@@ -197,7 +197,6 @@ def main():
         num_train_epochs=args.num_epochs,
         num_generations=args.num_generations,
         max_completion_length=args.max_completion_length,
-        max_prompt_length=args.max_prompt_length,
         per_device_train_batch_size=args.batch_size,
         gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
