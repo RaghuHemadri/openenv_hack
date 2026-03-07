@@ -14,13 +14,13 @@ Usage:
 
 from openenv.core.env_server.http_server import create_app
 
-from models import WatchDogAction, WatchDogObservation
-from .watchdog_environment import WatchDogEnvironment
+from models import MultiTurnAction, MultiTurnObservation
+from .watchdog_environment import WatchDogMultiTurnEnvironment
 
 app = create_app(
-    WatchDogEnvironment,
-    WatchDogAction,
-    WatchDogObservation,
+    WatchDogMultiTurnEnvironment,
+    MultiTurnAction,
+    MultiTurnObservation,
     env_name="watchdog_env",
     max_concurrent_envs=4,
 )
