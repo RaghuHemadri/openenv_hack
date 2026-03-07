@@ -638,22 +638,26 @@ def main():
             print(f"  Adjusted num_generations to {num_gens} (must divide "
                   f"generation_batch_size={gen_batch_size})")
 
+        # Compute max_steps explicitly (GRPO dataloader may not report length)
+        effective_batch = args.batch_size * num_gpus * args.gradient_accumulation_steps
+        max_steps = max(1, (len(train_episodes) * args.num_epochs) // effective_batch)
+        print(f"  effective_batch={effective_batch}, max_steps={max_steps}")
+
         grpo_config = GRPOConfig(
             output_dir=args.output_dir,
-            num_train_epochs=args.num_epochs,
+            max_steps=max_steps,
             num_generations=num_gens,
             max_completion_length=args.max_completion_length,
             per_device_train_batch_size=args.batch_size,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             learning_rate=args.learning_rate,
             optim="adamw_torch",
-            logging_steps=5,
-            save_steps=100,
+            logging_steps=1,
+            save_steps=max(1, max_steps),
             bf16=True,
             gradient_checkpointing=not args.use_unsloth,
             gradient_checkpointing_kwargs={"use_reentrant": False},
             report_to="none",
-            # Multi-GPU: deepspeed/fsdp handled by accelerate launch
             dataloader_num_workers=4,
         )
 
