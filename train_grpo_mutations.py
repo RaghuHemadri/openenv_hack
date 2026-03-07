@@ -434,8 +434,8 @@ def main():
                         help="Generate eval episodes from both gemini and template backends")
     parser.add_argument("--batch-size", type=int, default=4,
                         help="Per-device batch size (4xH200: use 4-8)")
-    parser.add_argument("--num-generations", type=int, default=16,
-                        help="GRPO generations per prompt (more=better signal)")
+    parser.add_argument("--num-generations", type=int, default=4,
+                        help="GRPO generations per prompt (must divide batch_size * num_gpus)")
     parser.add_argument("--output-dir", default="./watchdog_grpo_output")
     parser.add_argument("--results-file", default="./training_results.json")
     parser.add_argument("--use-unsloth", action="store_true",
@@ -627,10 +627,21 @@ def main():
                 rewards.append(reward)
             return rewards
 
+        # Ensure num_generations divides generation_batch_size
+        import torch
+        num_gpus = torch.cuda.device_count() or 1
+        gen_batch_size = args.batch_size * num_gpus
+        num_gens = args.num_generations
+        if gen_batch_size % num_gens != 0:
+            # Clamp down to the largest valid divisor <= requested
+            num_gens = max(g for g in range(1, num_gens + 1) if gen_batch_size % g == 0)
+            print(f"  Adjusted num_generations to {num_gens} (must divide "
+                  f"generation_batch_size={gen_batch_size})")
+
         grpo_config = GRPOConfig(
             output_dir=args.output_dir,
             num_train_epochs=args.num_epochs,
-            num_generations=args.num_generations,
+            num_generations=num_gens,
             max_completion_length=args.max_completion_length,
             per_device_train_batch_size=args.batch_size,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
