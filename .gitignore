@@ -6,4 +6,5 @@ dist/
 build/
 .venv/
 *.log
+.env
 watchdog_grpo_output/

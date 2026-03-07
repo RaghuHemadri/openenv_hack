@@ -1,11 +1,21 @@
-"""LLM Mutator — Uses Gemini (or fallback templates) to inject errors.
+"""LLM Mutator — Uses Gemini / local model (or fallback templates) to inject errors.
 
 The mutator takes a clean worker response + a MutationScenario and produces
 a corrupted version with a manifest describing what was changed.
 
 Supports:
-    - google.genai (Gemini API)
-    - Template fallback when LLM is unavailable / rate-limited
+    - google.genai  (Gemini API — default: gemini-3.0-flash)
+    - Local OpenAI-compatible endpoint (default model: qwen3-8b)
+    - Template fallback when no LLM is available / rate-limited
+
+Configuration via .env:
+    GEMINI_API_KEY          — Gemini API key
+    GEMINI_MODEL            — Gemini model name  (default: gemini-3.0-flash)
+    LOCAL_MODEL_URL         — OpenAI-compatible base URL for local model
+    LOCAL_MODEL_NAME        — Local model name    (default: qwen3-8b)
+    WATCHDOG_LLM_BACKEND    — "gemini" | "local"  (default: gemini)
+    WATCHDOG_TEMPERATURE    — generation temperature (default: 0.8)
+    WATCHDOG_USE_LLM        — set to "0" to force template-only mode
 """
 
 from __future__ import annotations
@@ -14,31 +24,48 @@ import json
 import logging
 import os
 import random
+from pathlib import Path
 from typing import Any
 
 from .registry import MutationScenario
 
 logger = logging.getLogger(__name__)
 
+# ── Load .env automatically ─────────────────────────────────────
 
-def _get_gemini_client():
-    """Lazy-init the Gemini client. Returns None if unavailable."""
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        return None
+
+def _load_dotenv() -> None:
+    """Load .env from the project root (best-effort, no hard dependency)."""
     try:
-        from google import genai
+        from dotenv import load_dotenv
 
-        client = genai.Client(api_key=api_key)
-        return client
-    except Exception:
-        try:
-            import google.generativeai as genai_legacy
+        # Walk upward from this file to find .env
+        env_path = Path(__file__).resolve().parent.parent.parent / ".env"
+        if env_path.is_file():
+            load_dotenv(env_path, override=False)
+            return
+        # Also try CWD
+        load_dotenv(override=False)
+    except ImportError:
+        # python-dotenv not installed — read .env manually
+        for candidate in (
+            Path(__file__).resolve().parent.parent.parent / ".env",
+            Path.cwd() / ".env",
+        ):
+            if candidate.is_file():
+                for line in candidate.read_text().splitlines():
+                    line = line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    if "=" in line:
+                        key, _, value = line.partition("=")
+                        key, value = key.strip(), value.strip()
+                        if key and key not in os.environ:
+                            os.environ[key] = value
+                break
 
-            genai_legacy.configure(api_key=api_key)
-            return genai_legacy
-        except Exception:
-            return None
+
+_load_dotenv()
 
 
 _MUTATION_SYSTEM_PROMPT = """\
@@ -74,15 +101,37 @@ class LLMMutator:
 
     def __init__(
         self,
-        model_name: str = "gemini-2.0-flash",
+        model_name: str | None = None,
         use_llm: bool = True,
-        temperature: float = 0.8,
+        temperature: float | None = None,
+        backend: str | None = None,
+        local_model_url: str | None = None,
+        local_model_name: str | None = None,
     ) -> None:
-        self.model_name = model_name
-        self.temperature = temperature
+        # Resolve from env vars, falling back to sensible defaults
+        self._backend = (
+            backend
+            or os.environ.get("WATCHDOG_LLM_BACKEND", "gemini")
+        ).lower()
+        self.model_name = (
+            model_name
+            or os.environ.get("GEMINI_MODEL", "gemini-3.0-flash")
+        )
+        self.temperature = float(
+            temperature if temperature is not None
+            else os.environ.get("WATCHDOG_TEMPERATURE", "0.8")
+        )
+        self._local_model_url = (
+            local_model_url
+            or os.environ.get("LOCAL_MODEL_URL", "")
+        ).rstrip("/") or None
+        self._local_model_name = (
+            local_model_name
+            or os.environ.get("LOCAL_MODEL_NAME", "qwen3-8b")
+        )
         self._use_llm = use_llm
         self._client = None
-        self._client_type: str | None = None  # "genai" or "legacy" or None
+        self._client_type: str | None = None  # "genai" | "legacy" | "local" | None
         self._initialized = False
 
     def _init_client(self) -> None:
@@ -94,6 +143,21 @@ class LLMMutator:
         if not self._use_llm:
             return
 
+        # ── Local model (OpenAI-compatible) ─────────────────────
+        if self._backend == "local" and self._local_model_url:
+            try:
+                import httpx  # noqa: F401  — just verify it's available
+                self._client = self._local_model_url
+                self._client_type = "local"
+                logger.info(
+                    "LLMMutator using local model %s at %s",
+                    self._local_model_name, self._local_model_url,
+                )
+                return
+            except ImportError:
+                logger.warning("httpx not installed — cannot use local model backend")
+
+        # ── Gemini API ──────────────────────────────────────────
         api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
         if not api_key:
             logger.info("No GEMINI_API_KEY/GOOGLE_API_KEY found. Using template fallback.")
@@ -105,7 +169,7 @@ class LLMMutator:
 
             self._client = genai.Client(api_key=api_key)
             self._client_type = "genai"
-            logger.info("LLMMutator initialized with google.genai SDK")
+            logger.info("LLMMutator initialized with google.genai (%s)", self.model_name)
             return
         except Exception as e:
             logger.debug(f"google.genai failed: {e}")
@@ -167,20 +231,31 @@ class LLMMutator:
         scenario: MutationScenario,
         context: dict[str, Any],
     ) -> tuple[str, dict[str, Any]]:
-        """Use Gemini to inject the error."""
+        """Use Gemini or local model to inject the error."""
         user_prompt = self._build_prompt(clean_response, scenario, context)
+        raw_text = self._llm_generate(user_prompt, json_mode=True)
+        return self._parse_llm_response(raw_text, scenario)
 
+    def _llm_generate(
+        self,
+        user_prompt: str,
+        json_mode: bool = False,
+    ) -> str:
+        """Unified generation dispatch across all backends."""
         if self._client_type == "genai":
+            config: dict[str, Any] = {
+                "temperature": self.temperature,
+                "system_instruction": _MUTATION_SYSTEM_PROMPT,
+            }
+            if json_mode:
+                config["response_mime_type"] = "application/json"
             response = self._client.models.generate_content(
                 model=self.model_name,
                 contents=user_prompt,
-                config={
-                    "temperature": self.temperature,
-                    "response_mime_type": "application/json",
-                    "system_instruction": _MUTATION_SYSTEM_PROMPT,
-                },
+                config=config,
             )
-            raw_text = response.text
+            return response.text
+
         elif self._client_type == "legacy":
             model = self._client.GenerativeModel(
                 self.model_name,
@@ -190,11 +265,37 @@ class LLMMutator:
                 user_prompt,
                 generation_config={"temperature": self.temperature},
             )
-            raw_text = response.text
-        else:
-            raise RuntimeError("No LLM client available")
+            return response.text
 
-        return self._parse_llm_response(raw_text, scenario)
+        elif self._client_type == "local":
+            return self._call_local_model(user_prompt, json_mode=json_mode)
+
+        raise RuntimeError("No LLM client available")
+
+    def _call_local_model(
+        self,
+        user_prompt: str,
+        json_mode: bool = False,
+    ) -> str:
+        """Call a local OpenAI-compatible API (Ollama, vLLM, llama.cpp, etc.)."""
+        import httpx
+
+        url = f"{self._local_model_url}/v1/chat/completions"
+        payload: dict[str, Any] = {
+            "model": self._local_model_name,
+            "messages": [
+                {"role": "system", "content": _MUTATION_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            "temperature": self.temperature,
+        }
+        if json_mode:
+            payload["response_format"] = {"type": "json_object"}
+
+        resp = httpx.post(url, json=payload, timeout=60.0)
+        resp.raise_for_status()
+        data = resp.json()
+        return data["choices"][0]["message"]["content"]
 
     def _build_prompt(
         self,
@@ -388,23 +489,7 @@ class LLMMutator:
             f"Generate ONLY the worker's reply (no JSON, no tags, just the text)."
         )
 
-        if self._client_type == "genai":
-            response = self._client.models.generate_content(
-                model=self.model_name,
-                contents=prompt,
-                config={"temperature": self.temperature},
-            )
-            text = response.text.strip()
-        elif self._client_type == "legacy":
-            model = self._client.GenerativeModel(self.model_name)
-            response = model.generate_content(
-                prompt,
-                generation_config={"temperature": self.temperature},
-            )
-            text = response.text.strip()
-        else:
-            raise RuntimeError("No LLM client")
-
+        text = self._llm_generate(prompt, json_mode=False).strip()
         return {"type": behavior, "response": text}
 
     def _generate_template_question_response(
