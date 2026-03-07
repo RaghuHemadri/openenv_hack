@@ -12,14 +12,18 @@ Usage:
     # Quick test (no GPU, template fallback only):
     python train_grpo_mutations.py --num-episodes 20 --dry-run
 
-    # Full training with Gemini mutations:
-    python train_grpo_mutations.py --num-episodes 50 --backend gemini
+    # Single-GPU training with Gemini mutations:
+    python train_grpo_mutations.py --num-episodes 200 --backend gemini
+
+    # Multi-GPU training (4xH200 recommended):
+    accelerate launch --num_processes 4 train_grpo_mutations.py \
+        --num-episodes 500 --batch-size 4 --num-generations 16 --test-both-backends
 
     # With Unsloth on Colab T4:
     python train_grpo_mutations.py --num-episodes 50 --use-unsloth
 
     # Test both backends (generates episodes from each, trains once):
-    python train_grpo_mutations.py --num-episodes 30 --test-both-backends
+    python train_grpo_mutations.py --num-episodes 200 --test-both-backends
 """
 
 import argparse
@@ -417,9 +421,9 @@ def write_results(
 def main():
     parser = argparse.ArgumentParser(description="WatchDog GRPO Training with Mutations")
     parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
-    parser.add_argument("--num-episodes", type=int, default=50,
+    parser.add_argument("--num-episodes", type=int, default=200,
                         help="Number of training episodes")
-    parser.add_argument("--num-eval", type=int, default=20,
+    parser.add_argument("--num-eval", type=int, default=50,
                         help="Number of evaluation episodes")
     parser.add_argument("--difficulty", type=int, default=2,
                         help="Curriculum difficulty (1-4)")
@@ -428,8 +432,10 @@ def main():
                         help="Mutation backend for training data")
     parser.add_argument("--test-both-backends", action="store_true",
                         help="Generate eval episodes from both gemini and template backends")
-    parser.add_argument("--batch-size", type=int, default=1)
-    parser.add_argument("--num-generations", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=4,
+                        help="Per-device batch size (4xH200: use 4-8)")
+    parser.add_argument("--num-generations", type=int, default=16,
+                        help="GRPO generations per prompt (more=better signal)")
     parser.add_argument("--output-dir", default="./watchdog_grpo_output")
     parser.add_argument("--results-file", default="./training_results.json")
     parser.add_argument("--use-unsloth", action="store_true",
@@ -438,7 +444,8 @@ def main():
     parser.add_argument("--max-prompt-length", type=int, default=1024)
     parser.add_argument("--learning-rate", type=float, default=5e-6)
     parser.add_argument("--num-epochs", type=int, default=1)
-    parser.add_argument("--gradient-accumulation-steps", type=int, default=4)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=2,
+                        help="Gradient accumulation steps (lower with more GPUs)")
     parser.add_argument("--dry-run", action="store_true",
                         help="Generate data + eval only, skip actual GRPO training")
     parser.add_argument("--seed", type=int, default=42)
@@ -628,13 +635,15 @@ def main():
             per_device_train_batch_size=args.batch_size,
             gradient_accumulation_steps=args.gradient_accumulation_steps,
             learning_rate=args.learning_rate,
-            optim="adamw_8bit",
+            optim="adamw_torch",
             logging_steps=5,
             save_steps=100,
             bf16=True,
-            gradient_checkpointing=True,
+            gradient_checkpointing=not args.use_unsloth,
             gradient_checkpointing_kwargs={"use_reentrant": False},
             report_to="none",
+            # Multi-GPU: deepspeed/fsdp handled by accelerate launch
+            dataloader_num_workers=4,
         )
 
         trainer_kwargs = dict(
