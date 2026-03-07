@@ -195,7 +195,7 @@ def main():
         from transformers import AutoModelForCausalLM, AutoTokenizer
         import torch
 
-        tokenizer = AutoTokenizer.from_pretrained(args.model)
+        tokenizer = AutoTokenizer.from_pretrained(args.model, padding_side="left")
         model = AutoModelForCausalLM.from_pretrained(
             args.model,
             torch_dtype=torch.bfloat16,
