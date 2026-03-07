@@ -151,13 +151,15 @@ def main():
     parser.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct")
     parser.add_argument("--env-url", default="http://localhost:8000")
     parser.add_argument("--num-episodes", type=int, default=500)
-    parser.add_argument("--batch-size", type=int, default=4)
+    parser.add_argument("--batch-size", type=int, default=1)
     parser.add_argument("--num-generations", type=int, default=4)
     parser.add_argument("--output-dir", default="./watchdog_grpo_output")
     parser.add_argument("--use-unsloth", action="store_true", help="Use Unsloth for 4x faster training")
     parser.add_argument("--max-completion-length", type=int, default=512)
+    parser.add_argument("--max-prompt-length", type=int, default=1024)
     parser.add_argument("--learning-rate", type=float, default=5e-6)
     parser.add_argument("--num-epochs", type=int, default=3)
+    parser.add_argument("--gradient-accumulation-steps", type=int, default=16)
     args = parser.parse_args()
 
     os.environ["WATCHDOG_ENV_URL"] = args.env_url
@@ -195,12 +197,16 @@ def main():
         num_train_epochs=args.num_epochs,
         num_generations=args.num_generations,
         max_completion_length=args.max_completion_length,
+        max_prompt_length=args.max_prompt_length,
         per_device_train_batch_size=args.batch_size,
-        gradient_accumulation_steps=4,
+        gradient_accumulation_steps=args.gradient_accumulation_steps,
         learning_rate=args.learning_rate,
+        optim="adamw_8bit",
         logging_steps=10,
         save_steps=100,
         bf16=True,
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
     )
 
     trainer_kwargs = dict(
