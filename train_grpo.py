@@ -168,7 +168,6 @@ def main():
     dataset = build_dataset(args.env_url, args.num_episodes)
     print(f"Dataset built: {len(dataset)} prompts")
 
-    model = args.model
     tokenizer = None
 
     if args.use_unsloth:
@@ -190,6 +189,16 @@ def main():
             lora_alpha=16,
             lora_dropout=0,
             use_gradient_checkpointing="unsloth",
+        )
+    else:
+        print(f"Loading model {args.model}...")
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+        import torch
+
+        tokenizer = AutoTokenizer.from_pretrained(args.model)
+        model = AutoModelForCausalLM.from_pretrained(
+            args.model,
+            torch_dtype=torch.bfloat16,
         )
 
     grpo_config = GRPOConfig(
