@@ -43,11 +43,14 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import queue
 import random
 import re
 import sys
+import threading
 import time
 from collections import defaultdict
+from concurrent.futures import Future, ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -337,6 +340,81 @@ def _prompt_key(prompt: list[dict]) -> str:
 
 
 # ────────────────────────────────────────────────────────────────────
+# GPU Batch Scheduler — collects LLM requests across threads, batches on GPU
+# ────────────────────────────────────────────────────────────────────
+
+class GPUBatchScheduler:
+    """Producer-consumer batch scheduler for GPU inference.
+
+    Multiple episode-generation threads submit inference requests via submit().
+    A background worker thread collects them into batches and runs
+    invoke_batch() on the GPU, returning results to the waiting threads
+    through Futures.
+
+    This maximizes GPU utilization: instead of 1 prompt at a time,
+    the GPU processes max_batch_size prompts in one forward pass.
+    """
+
+    def __init__(self, hf_model, max_batch_size: int = 16, timeout: float = 0.02):
+        self._model = hf_model
+        self._max_batch_size = max_batch_size
+        self._timeout = timeout
+        self._queue: queue.Queue[tuple[list, Future]] = queue.Queue()
+        self._running = True
+        self._thread = threading.Thread(target=self._worker, daemon=True)
+        self._thread.start()
+
+    def submit(self, messages):
+        """Submit an inference request and block until result is ready."""
+        fut: Future = Future()
+        self._queue.put((messages, fut))
+        return fut.result()  # blocks until GPU batch processes this
+
+    def _worker(self):
+        """Background thread: collect requests into batches, run on GPU."""
+        while self._running:
+            batch: list[tuple[list, Future]] = []
+
+            # Block-wait for the first item
+            try:
+                item = self._queue.get(timeout=self._timeout)
+                batch.append(item)
+            except queue.Empty:
+                continue
+
+            # Drain up to max_batch_size (non-blocking)
+            while len(batch) < self._max_batch_size:
+                try:
+                    item = self._queue.get_nowait()
+                    batch.append(item)
+                except queue.Empty:
+                    break
+
+            # Process on GPU
+            messages_list = [msgs for msgs, _ in batch]
+            try:
+                results = self._model.invoke_batch(messages_list)
+                for (_, fut), result in zip(batch, results):
+                    fut.set_result(result)
+            except Exception as e:
+                for _, fut in batch:
+                    if not fut.done():
+                        fut.set_exception(e)
+
+    def shutdown(self):
+        self._running = False
+        self._thread.join(timeout=5.0)
+
+
+# Global scheduler instance (set during episode generation when backend=local)
+_gpu_scheduler: GPUBatchScheduler | None = None
+
+
+def _get_gpu_scheduler() -> GPUBatchScheduler | None:
+    return _gpu_scheduler
+
+
+# ────────────────────────────────────────────────────────────────────
 # Episode Generation
 # ────────────────────────────────────────────────────────────────────
 
@@ -369,6 +447,9 @@ def _configure_backends(backend: str) -> None:
     # backend is "gemini" (API) or "local" (HF on GPU).
     # For "template", fall through to the fast template monkey-patch.
     if backend == "gemini" or backend == "local":
+        if backend == "local":
+            # Eagerly init the HF model + set up batch scheduler
+            _setup_local_batch_scheduler()
         return
 
     # --- Template fallback for player response generation (fast) ---
@@ -432,6 +513,42 @@ def _configure_backends(backend: str) -> None:
 
     # Monkey-patch the LLM response generator
     _avalon_mod._generate_player_response_llm = _template_response  # type: ignore[attr-defined]
+
+
+def _setup_local_batch_scheduler() -> None:
+    """Initialize the HF model, batch scheduler, and monkey-patch invoke()
+    so that parallel episode-generation threads route through the GPU batch queue."""
+    global _gpu_scheduler
+
+    from watchdog_env.envs import avalon as _avalon_mod
+    from watchdog_env.envs.avalon import _get_local_hf_llm
+
+    hf_model = _get_local_hf_llm()
+
+    # Also set up as the Cicero LLM
+    global _cicero_llm_instance
+    _cicero_llm_instance = hf_model
+
+    # Set as the Avalon singleton
+    _avalon_mod._llm_instance = hf_model
+
+    if _gpu_scheduler is not None:
+        _gpu_scheduler.shutdown()
+
+    batch_size = int(os.environ.get("GPU_BATCH_SIZE", "16"))
+    _gpu_scheduler = GPUBatchScheduler(hf_model, max_batch_size=batch_size)
+
+    # Monkey-patch invoke() to route through the batch scheduler
+    _original_invoke = hf_model.invoke
+
+    def _batched_invoke(messages):
+        scheduler = _get_gpu_scheduler()
+        if scheduler is not None:
+            return scheduler.submit(messages)
+        return _original_invoke(messages)
+
+    hf_model.invoke = _batched_invoke
+    print(f"  [GPU-Async] Batch scheduler active (max_batch={batch_size})")
 
 
 # ────────────────────────────────────────────────────────────────────
@@ -637,6 +754,108 @@ def _episode_difficulty(ep_idx: int, total: int, base_difficulty: int, curriculu
     return 4
 
 
+def _generate_one_avalon_episode(
+    ep_idx: int,
+    global_ep_idx: int,
+    difficulty: int,
+    curriculum: bool,
+    seed: int,
+    backend: str,
+    max_turns: int,
+    num_episodes: int,
+) -> tuple[list[dict], dict]:
+    """Generate a single Avalon episode. Thread-safe when using batch scheduler."""
+    ep_diff = _episode_difficulty(ep_idx, num_episodes, difficulty, curriculum)
+    config = LEVEL_CONFIG.get(ep_diff, LEVEL_CONFIG[2])
+
+    game = AvalonGame(level=ep_diff, seed=seed + ep_idx)
+    game.reset(seed=seed + ep_idx)
+
+    wolf_count = sum(1 for p in game.state.players if p.role == "Werewolf")
+    start_episode(game_id="avalon", wolf_count=wolf_count, num_rounds=config["num_rounds"])
+
+    conversation_so_far = ""
+    turn_idx = 0
+    ep_turns: list[dict] = []
+
+    while not game.is_done and turn_idx < max_turns:
+        turn = game.step()
+        if turn.get("game_over"):
+            break
+
+        clean_response = turn["message"]
+        mutated_response, has_error, error_detail = maybe_mutate(
+            clean_response=clean_response,
+            speaker_role=turn["role"],
+            level=ep_diff,
+            context={
+                "speaker_id": turn.get("speaker_id"),
+                "day": turn.get("day"),
+                "phase": turn.get("phase"),
+            },
+            game_id="avalon",
+        )
+
+        round_data = {
+            "has_error": has_error,
+            "error_detail": error_detail,
+            "worker_response": mutated_response,
+        }
+
+        turn_data = {
+            **turn,
+            "displayed_response": mutated_response,
+            "has_error": has_error,
+        }
+
+        prompt = build_step_prompt(
+            conversation_so_far=conversation_so_far,
+            current_turn_data=turn_data,
+            round_number=turn_idx + 1,
+            total_rounds=game._max_rounds,
+            difficulty=ep_diff,
+        )
+
+        key = _prompt_key(prompt)
+        _ground_truth[key] = round_data
+
+        example = {
+            "prompt": prompt,
+            "round_data": round_data,
+            "difficulty": ep_diff,
+            "round_number": turn_idx + 1,
+            "total_rounds": game._max_rounds,
+            "episode_idx": global_ep_idx,
+            "task_id": f"ep-{global_ep_idx}",
+            "backend": backend,
+            "domain": "avalon",
+            "speaker_role": turn["role"],
+            "speaker_display": turn.get("speaker_display", "Player"),
+        }
+        ep_turns.append(example)
+
+        speaker = turn.get("speaker_display", "Player")
+        conversation_so_far += (
+            f"[Turn {turn_idx + 1}]\n"
+            f"  Moderator: {turn.get('moderator_prompt', '')}\n"
+            f"  {speaker}: {mutated_response}\n\n"
+        )
+        turn_idx += 1
+
+    n_mutated = sum(1 for t in ep_turns if t["round_data"]["has_error"])
+    summary = {
+        "episode_idx": global_ep_idx,
+        "difficulty": ep_diff,
+        "total_turns": len(ep_turns),
+        "mutated_turns": n_mutated,
+        "clean_turns": len(ep_turns) - n_mutated,
+        "wolf_count": wolf_count,
+        "domain": "avalon",
+    }
+
+    return ep_turns, summary
+
+
 def _generate_avalon_episodes(
     num_episodes: int,
     difficulty: int,
@@ -646,43 +865,108 @@ def _generate_avalon_episodes(
     backend: str = "template",
     max_turns: int = 10,
 ) -> tuple[list[dict], list[dict]]:
-    """Generate mutated Avalon episodes."""
-    examples: list[dict] = []
-    episode_summaries: list[dict] = []
+    """Generate mutated Avalon episodes. Uses thread pool when batch scheduler is active."""
+    use_parallel = _gpu_scheduler is not None and backend == "local"
+    num_workers = int(os.environ.get("EP_GEN_WORKERS", "8")) if use_parallel else 1
 
+    if use_parallel:
+        print(f"  [Avalon] Generating {num_episodes} episodes in parallel "
+              f"({num_workers} workers, GPU batch scheduler active)...")
+        examples: list[dict] = []
+        episode_summaries: list[dict] = []
+
+        def _run_one(ep_idx: int):
+            return _generate_one_avalon_episode(
+                ep_idx, ep_offset + ep_idx, difficulty, curriculum,
+                seed, backend, max_turns, num_episodes,
+            )
+
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = {pool.submit(_run_one, i): i for i in range(num_episodes)}
+            done_count = 0
+            for fut in futures:
+                ep_turns, summary = fut.result()
+                examples.extend(ep_turns)
+                episode_summaries.append(summary)
+                done_count += 1
+                if done_count % 10 == 0 or done_count == num_episodes:
+                    print(f"  [Avalon] Completed {done_count}/{num_episodes} episodes")
+
+        return examples, episode_summaries
+
+    # Sequential fallback (template / gemini)
+    examples = []
+    episode_summaries = []
     for ep_idx in range(num_episodes):
-        global_ep_idx = ep_offset + ep_idx
         if (ep_idx + 1) % 10 == 0 or ep_idx == 0 or ep_idx == num_episodes - 1:
             print(f"  [Avalon] Generating episode {ep_idx + 1}/{num_episodes}...")
-        ep_diff = _episode_difficulty(ep_idx, num_episodes, difficulty, curriculum)
-        config = LEVEL_CONFIG.get(ep_diff, LEVEL_CONFIG[2])
+        ep_turns, summary = _generate_one_avalon_episode(
+            ep_idx, ep_offset + ep_idx, difficulty, curriculum,
+            seed, backend, max_turns, num_episodes,
+        )
+        examples.extend(ep_turns)
+        episode_summaries.append(summary)
 
-        game = AvalonGame(level=ep_diff, seed=seed + ep_idx)
-        game.reset(seed=seed + ep_idx)
+    return examples, episode_summaries
 
-        wolf_count = sum(1 for p in game.state.players if p.role == "Werewolf")
-        start_episode(game_id="avalon", wolf_count=wolf_count, num_rounds=config["num_rounds"])
 
-        conversation_so_far = ""
-        turn_idx = 0
-        ep_turns: list[dict] = []
+def _generate_one_cicero_episode(
+    ep_idx: int,
+    global_ep_idx: int,
+    difficulty: int,
+    curriculum: bool,
+    seed: int,
+    backend: str,
+    max_turns: int,
+    num_episodes: int,
+) -> tuple[list[dict], dict]:
+    """Generate a single Cicero episode. Thread-safe when using batch scheduler."""
+    ep_diff = _episode_difficulty(ep_idx, num_episodes, difficulty, curriculum)
 
-        while not game.is_done and turn_idx < max_turns:
-            turn = game.step()
-            if turn.get("game_over"):
-                break
+    rng = random.Random(seed + ep_idx)
+    power_a, power_b = rng.sample(_CICERO_POWERS, 2)
+    num_steps = rng.randint(2, max(2, max_turns // 2))
+    total_turns = num_steps * 2
+    if total_turns > max_turns:
+        num_steps = max_turns // 2
+        total_turns = num_steps * 2
+    season = rng.choice(_CICERO_SEASONS)
+    region = rng.choice(_CICERO_REGIONS)
+    domain_name, domain_desc = rng.choice(_CICERO_DOMAINS)
 
-            clean_response = turn["message"]
+    start_episode(game_id="cicero", num_steps=total_turns)
+
+    conversation_so_far = ""
+    turn_idx = 0
+    ep_turns: list[dict] = []
+
+    for step_idx in range(num_steps):
+        for i, power in enumerate([power_a, power_b]):
+            other = power_b if power == power_a else power_a
+            is_opening = (step_idx == 0 and i == 0)
+
+            if backend == "template":
+                clean_response = _cicero_template_response(
+                    power, other, season, region, domain_desc, is_opening,
+                )
+            else:
+                clean_response = _cicero_gemini_response(
+                    power, other, season, region, domain_desc,
+                    is_opening, transcript_so_far=conversation_so_far,
+                )
+
             mutated_response, has_error, error_detail = maybe_mutate(
                 clean_response=clean_response,
-                speaker_role=turn["role"],
+                speaker_role=power,
                 level=ep_diff,
                 context={
-                    "speaker_id": turn.get("speaker_id"),
-                    "day": turn.get("day"),
-                    "phase": turn.get("phase"),
+                    "speaker_id": power,
+                    "season": season,
+                    "region": region,
+                    "domain_name": domain_name,
+                    "counterpart": other,
                 },
-                game_id="avalon",
+                game_id="cicero",
             )
 
             round_data = {
@@ -692,16 +976,20 @@ def _generate_avalon_episodes(
             }
 
             turn_data = {
-                **turn,
+                "speaker_display": power,
                 "displayed_response": mutated_response,
                 "has_error": has_error,
+                "season": season,
+                "region": region,
+                "domain_desc": domain_desc,
+                "counterpart": other,
             }
 
-            prompt = build_step_prompt(
+            prompt = build_cicero_step_prompt(
                 conversation_so_far=conversation_so_far,
                 current_turn_data=turn_data,
                 round_number=turn_idx + 1,
-                total_rounds=game._max_rounds,
+                total_rounds=total_turns,
                 difficulty=ep_diff,
             )
 
@@ -713,37 +1001,33 @@ def _generate_avalon_episodes(
                 "round_data": round_data,
                 "difficulty": ep_diff,
                 "round_number": turn_idx + 1,
-                "total_rounds": game._max_rounds,
+                "total_rounds": total_turns,
                 "episode_idx": global_ep_idx,
                 "task_id": f"ep-{global_ep_idx}",
                 "backend": backend,
-                "domain": "avalon",
-                "speaker_role": turn["role"],
-                "speaker_display": turn.get("speaker_display", "Player"),
+                "domain": "cicero",
+                "speaker_role": power,
+                "speaker_display": power,
             }
-            examples.append(example)
             ep_turns.append(example)
 
-            speaker = turn.get("speaker_display", "Player")
             conversation_so_far += (
-                f"[Turn {turn_idx + 1}]\n"
-                f"  Moderator: {turn.get('moderator_prompt', '')}\n"
-                f"  {speaker}: {mutated_response}\n\n"
+                f"[Turn {turn_idx + 1}] {power}: {mutated_response}\n\n"
             )
             turn_idx += 1
 
-        n_mutated = sum(1 for t in ep_turns if t["round_data"]["has_error"])
-        episode_summaries.append({
-            "episode_idx": global_ep_idx,
-            "difficulty": ep_diff,
-            "total_turns": len(ep_turns),
-            "mutated_turns": n_mutated,
-            "clean_turns": len(ep_turns) - n_mutated,
-            "wolf_count": wolf_count,
-            "domain": "avalon",
-        })
+    n_mutated = sum(1 for t in ep_turns if t["round_data"]["has_error"])
+    summary = {
+        "episode_idx": global_ep_idx,
+        "difficulty": ep_diff,
+        "total_turns": len(ep_turns),
+        "mutated_turns": n_mutated,
+        "clean_turns": len(ep_turns) - n_mutated,
+        "domain": "cicero",
+        "powers": [power_a, power_b],
+    }
 
-    return examples, episode_summaries
+    return ep_turns, summary
 
 
 def _generate_cicero_episodes(
@@ -755,125 +1039,47 @@ def _generate_cicero_episodes(
     backend: str = "template",
     max_turns: int = 10,
 ) -> tuple[list[dict], list[dict]]:
-    """Generate mutated Cicero/Diplomacy negotiation episodes."""
-    examples: list[dict] = []
-    episode_summaries: list[dict] = []
+    """Generate mutated Cicero/Diplomacy episodes. Uses thread pool when batch scheduler is active."""
+    use_parallel = _gpu_scheduler is not None and backend == "local"
+    num_workers = int(os.environ.get("EP_GEN_WORKERS", "8")) if use_parallel else 1
 
+    if use_parallel:
+        print(f"  [Cicero] Generating {num_episodes} episodes in parallel "
+              f"({num_workers} workers, GPU batch scheduler active)...")
+        examples: list[dict] = []
+        episode_summaries: list[dict] = []
+
+        def _run_one(ep_idx: int):
+            return _generate_one_cicero_episode(
+                ep_idx, ep_offset + ep_idx, difficulty, curriculum,
+                seed, backend, max_turns, num_episodes,
+            )
+
+        with ThreadPoolExecutor(max_workers=num_workers) as pool:
+            futures = {pool.submit(_run_one, i): i for i in range(num_episodes)}
+            done_count = 0
+            for fut in futures:
+                ep_turns, summary = fut.result()
+                examples.extend(ep_turns)
+                episode_summaries.append(summary)
+                done_count += 1
+                if done_count % 10 == 0 or done_count == num_episodes:
+                    print(f"  [Cicero] Completed {done_count}/{num_episodes} episodes")
+
+        return examples, episode_summaries
+
+    # Sequential fallback (template / gemini)
+    examples = []
+    episode_summaries = []
     for ep_idx in range(num_episodes):
-        global_ep_idx = ep_offset + ep_idx
         if (ep_idx + 1) % 10 == 0 or ep_idx == 0 or ep_idx == num_episodes - 1:
             print(f"  [Cicero] Generating episode {ep_idx + 1}/{num_episodes}...")
-        ep_diff = _episode_difficulty(ep_idx, num_episodes, difficulty, curriculum)
-
-        power_a, power_b = random.sample(_CICERO_POWERS, 2)
-        num_steps = random.randint(2, max(2, max_turns // 2))
-        total_turns = num_steps * 2  # 2 turns per step
-        if total_turns > max_turns:
-            num_steps = max_turns // 2
-            total_turns = num_steps * 2
-        season = random.choice(_CICERO_SEASONS)
-        region = random.choice(_CICERO_REGIONS)
-        domain_name, domain_desc = random.choice(_CICERO_DOMAINS)
-
-        start_episode(game_id="cicero", num_steps=total_turns)
-
-        conversation_so_far = ""
-        turn_idx = 0
-        ep_turns: list[dict] = []
-
-        for step_idx in range(num_steps):
-            for i, power in enumerate([power_a, power_b]):
-                other = power_b if power == power_a else power_a
-                is_opening = (step_idx == 0 and i == 0)
-
-                if backend == "template":
-                    clean_response = _cicero_template_response(
-                        power, other, season, region, domain_desc, is_opening,
-                    )
-                elif backend == "local":
-                    # Use local HF model on GPU — same interface as Gemini
-                    clean_response = _cicero_gemini_response(
-                        power, other, season, region, domain_desc,
-                        is_opening, transcript_so_far=conversation_so_far,
-                    )
-                else:
-                    clean_response = _cicero_gemini_response(
-                        power, other, season, region, domain_desc,
-                        is_opening, transcript_so_far=conversation_so_far,
-                    )
-
-                mutated_response, has_error, error_detail = maybe_mutate(
-                    clean_response=clean_response,
-                    speaker_role=power,
-                    level=ep_diff,
-                    context={
-                        "speaker_id": power,
-                        "season": season,
-                        "region": region,
-                        "domain_name": domain_name,
-                        "counterpart": other,
-                    },
-                    game_id="cicero",
-                )
-
-                round_data = {
-                    "has_error": has_error,
-                    "error_detail": error_detail,
-                    "worker_response": mutated_response,
-                }
-
-                turn_data = {
-                    "speaker_display": power,
-                    "displayed_response": mutated_response,
-                    "has_error": has_error,
-                    "season": season,
-                    "region": region,
-                    "domain_desc": domain_desc,
-                    "counterpart": other,
-                }
-
-                prompt = build_cicero_step_prompt(
-                    conversation_so_far=conversation_so_far,
-                    current_turn_data=turn_data,
-                    round_number=turn_idx + 1,
-                    total_rounds=total_turns,
-                    difficulty=ep_diff,
-                )
-
-                key = _prompt_key(prompt)
-                _ground_truth[key] = round_data
-
-                example = {
-                    "prompt": prompt,
-                    "round_data": round_data,
-                    "difficulty": ep_diff,
-                    "round_number": turn_idx + 1,
-                    "total_rounds": total_turns,
-                    "episode_idx": global_ep_idx,
-                    "task_id": f"ep-{global_ep_idx}",
-                    "backend": backend,
-                    "domain": "cicero",
-                    "speaker_role": power,
-                    "speaker_display": power,
-                }
-                examples.append(example)
-                ep_turns.append(example)
-
-                conversation_so_far += (
-                    f"[Turn {turn_idx + 1}] {power}: {mutated_response}\n\n"
-                )
-                turn_idx += 1
-
-        n_mutated = sum(1 for t in ep_turns if t["round_data"]["has_error"])
-        episode_summaries.append({
-            "episode_idx": global_ep_idx,
-            "difficulty": ep_diff,
-            "total_turns": len(ep_turns),
-            "mutated_turns": n_mutated,
-            "clean_turns": len(ep_turns) - n_mutated,
-            "domain": "cicero",
-            "powers": [power_a, power_b],
-        })
+        ep_turns, summary = _generate_one_cicero_episode(
+            ep_idx, ep_offset + ep_idx, difficulty, curriculum,
+            seed, backend, max_turns, num_episodes,
+        )
+        examples.extend(ep_turns)
+        episode_summaries.append(summary)
 
     return examples, episode_summaries
 

@@ -203,7 +203,7 @@ class _HFChatResponse:
 class _HFChatModel:
     """Lightweight wrapper that loads a HuggingFace model and exposes
     an .invoke([SystemMessage, HumanMessage]) interface compatible with
-    LangChain ChatModels."""
+    LangChain ChatModels.  Also supports batched inference via invoke_batch()."""
 
     def __init__(self, model_name: str, temperature: float = 0.8):
         import torch
@@ -223,11 +223,10 @@ class _HFChatModel:
         self.model.eval()
         print(f"  [HF-Local] {model_name} loaded on {self.model.device}")
 
-    def invoke(self, messages) -> _HFChatResponse:
-        """Generate a response from a list of message dicts or LangChain messages."""
-        import torch
+    # ── helpers ──────────────────────────────────────────────────
 
-        # Convert LangChain messages to dicts
+    def _messages_to_prompt(self, messages) -> str:
+        """Convert a list of message dicts / LangChain messages to a prompt string."""
         chat = []
         for m in messages:
             if hasattr(m, "content"):
@@ -243,14 +242,23 @@ class _HFChatModel:
                 chat.append(m)
 
         if hasattr(self.tokenizer, "apply_chat_template"):
-            prompt_text = self.tokenizer.apply_chat_template(
+            return self.tokenizer.apply_chat_template(
                 chat, tokenize=False, add_generation_prompt=True,
             )
-        else:
-            prompt_text = "\n".join(
+        return (
+            "\n".join(
                 f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>" for m in chat
             )
-            prompt_text += "\n<|im_start|>assistant\n"
+            + "\n<|im_start|>assistant\n"
+        )
+
+    # ── single inference ─────────────────────────────────────────
+
+    def invoke(self, messages) -> _HFChatResponse:
+        """Generate a response from a list of message dicts or LangChain messages."""
+        import torch
+
+        prompt_text = self._messages_to_prompt(messages)
 
         inputs = self.tokenizer(
             prompt_text, return_tensors="pt", truncation=True, max_length=2048,
@@ -268,6 +276,59 @@ class _HFChatModel:
 
         generated = output_ids[0][inputs["input_ids"].shape[1]:]
         text = self.tokenizer.decode(generated, skip_special_tokens=True).strip()
+        return _HFChatResponse(text if text else "I have nothing to say.")
+
+    # ── batched inference ────────────────────────────────────────
+
+    def invoke_batch(self, messages_list: list) -> list[_HFChatResponse]:
+        """Batch inference: process multiple prompts in one GPU forward pass.
+
+        Args:
+            messages_list: List of message lists (each element is what invoke() takes).
+
+        Returns:
+            List of _HFChatResponse, one per input prompt.
+        """
+        import torch
+
+        if len(messages_list) == 1:
+            return [self.invoke(messages_list[0])]
+
+        prompt_texts = [self._messages_to_prompt(msgs) for msgs in messages_list]
+
+        # Left-pad for batched decoder generation
+        orig_padding_side = self.tokenizer.padding_side
+        self.tokenizer.padding_side = "left"
+
+        inputs = self.tokenizer(
+            prompt_texts,
+            return_tensors="pt",
+            padding=True,
+            truncation=True,
+            max_length=2048,
+        )
+        self.tokenizer.padding_side = orig_padding_side
+        inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+
+        # Per-sample input lengths (non-padding tokens)
+        input_lengths = inputs["attention_mask"].sum(dim=1)
+
+        with torch.no_grad():
+            output_ids = self.model.generate(
+                **inputs,
+                max_new_tokens=256,
+                do_sample=self.temperature > 0,
+                temperature=self.temperature if self.temperature > 0 else None,
+                top_p=0.9 if self.temperature > 0 else None,
+            )
+
+        results = []
+        for i in range(len(messages_list)):
+            gen_ids = output_ids[i][input_lengths[i]:]
+            text = self.tokenizer.decode(gen_ids, skip_special_tokens=True).strip()
+            results.append(_HFChatResponse(text if text else "I have nothing to say."))
+
+        return results
         return _HFChatResponse(text if text else "I have nothing to say.")
 
 
