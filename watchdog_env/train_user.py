@@ -16,7 +16,6 @@ Usage:
     --lora_rank     LoRA rank                 (default: 16)
     --output_dir    Save dir                  (default: watchdog_env/outputs)
     --game_id       Game to use               (default: avalon)
-    --batch_size    Episodes per LLM batch    (default: 16)
 """
 
 from __future__ import annotations
@@ -65,102 +64,59 @@ def generate_episodes(
     game_id: str = "avalon",
     use_llm: bool = True,
     difficulty: int = 2,
-    batch_size: int = 16,
 ) -> list[dict[str, Any]]:
-    """Generate training episodes with batched LLM calls across concurrent episodes."""
+    """Generate training episodes using WatchDogMultiTurnEnvironment directly."""
     wd_root = Path(__file__).resolve().parent
     if str(wd_root) not in sys.path:
         sys.path.insert(0, str(wd_root))
 
     from server.watchdog_environment import WatchDogMultiTurnEnvironment
-    from plugins.avalon.llm import generate_player_responses_batch
+    from models import MultiTurnAction
 
     episodes = []
+    for ep_idx in range(num_episodes):
+        env = WatchDogMultiTurnEnvironment(
+            game_id=game_id, use_mutations=True, use_llm=use_llm,
+        )
+        seed = ep_idx + 42
+        obs = env.reset(seed=seed)
+        turns = []
 
-    for batch_start in range(0, num_episodes, batch_size):
-        batch_end = min(batch_start + batch_size, num_episodes)
-        n = batch_end - batch_start
-
-        # Create environments and reset (deferred — no LLM calls yet)
-        envs = []
-        ep_turns: list[list[dict]] = [[] for _ in range(n)]
-        for i in range(n):
-            env = WatchDogMultiTurnEnvironment(
-                game_id=game_id, use_mutations=True, use_llm=use_llm,
+        while obs.phase != "done" and len(turns) < MAX_TURNS:
+            user_prompt = (
+                f"Game: {obs.task_domain} | Turn {obs.current_turn_number}/{obs.total_turns} "
+                f"| Difficulty: {obs.difficulty}\n\n"
+                f"Conversation so far:\n{obs.conversation_so_far}\n\n"
+                f"Current turn to evaluate:\n{obs.current_turn}\n\n"
+                f"Decide: PASS, FLAG, or QUESTION?"
             )
-            env.reset_deferred(seed=batch_start + i + 42)
-            envs.append(env)
 
-        active = set(range(n))
+            has_error = getattr(env, '_current_has_error', False)
+            error_detail = getattr(env, '_current_error_detail', None)
+            error_type = error_detail.get("type", "unknown") if has_error and error_detail else None
 
-        # Wave loop: each wave batches one LLM call per active episode
-        for _wave in range(MAX_TURNS + 2):
-            if not active:
-                break
-
-            # Phase 1: Collect LLM requests from all active envs
-            requests = []       # (speaker, game_state, moderator_prompt)
-            req_indices = []    # which env index each request maps to
-            for idx in list(active):
-                info = envs[idx].prepare_advance()
-                if info is None:
-                    active.discard(idx)
-                    continue
-                requests.append(info)
-                req_indices.append(idx)
-
-            if not requests:
-                break
-
-            # Phase 2: Single batched LLM call for all active episodes
-            responses = generate_player_responses_batch(requests)
-
-            # Phase 3: Complete turns and extract training samples
-            for env_idx, response in zip(req_indices, responses):
-                env = envs[env_idx]
-                env.complete_advance(response)
-                obs = env._build_observation(step_reward=None, feedback=None)
-
-                has_error = getattr(env, '_current_has_error', False)
-                error_detail = getattr(env, '_current_error_detail', None)
-                error_type = (
-                    error_detail.get("type", "unknown")
-                    if has_error and error_detail else None
-                )
-
-                user_prompt = (
-                    f"Game: {obs.task_domain} | Turn {obs.current_turn_number}/{obs.total_turns} "
-                    f"| Difficulty: {obs.difficulty}\n\n"
-                    f"Conversation so far:\n{obs.conversation_so_far}\n\n"
-                    f"Current turn to evaluate:\n{obs.current_turn}\n\n"
-                    f"Decide: PASS, FLAG, or QUESTION?"
-                )
-
-                ep_turns[env_idx].append({
-                    "prompt": [
-                        {"role": "system", "content": OVERSEER_SYSTEM_PROMPT},
-                        {"role": "user", "content": user_prompt},
-                    ],
-                    "ground_truth": "FLAG" if has_error else "PASS",
-                    "error_type": error_type,
-                    "has_error": has_error,
-                    "turn_number": obs.current_turn_number,
-                })
-
-                if env._game_done() or len(ep_turns[env_idx]) >= MAX_TURNS:
-                    active.discard(env_idx)
-
-        # Collect episodes from this batch
-        for i in range(n):
-            episodes.append({
-                "episode_id": batch_start + i,
-                "game_id": game_id,
-                "num_turns": len(ep_turns[i]),
-                "turns": ep_turns[i],
+            turns.append({
+                "prompt": [
+                    {"role": "system", "content": OVERSEER_SYSTEM_PROMPT},
+                    {"role": "user", "content": user_prompt},
+                ],
+                "ground_truth": "FLAG" if has_error else "PASS",
+                "error_type": error_type,
+                "has_error": has_error,
+                "turn_number": obs.current_turn_number,
             })
 
-        if batch_end % 10 == 0 or batch_end == num_episodes:
-            print(f"  Generated {batch_end}/{num_episodes} episodes")
+            obs = env.step(MultiTurnAction(action_type="pass"))
+
+        episodes.append({
+            "episode_id": ep_idx,
+            "game_id": game_id,
+            "num_turns": len(turns),
+            "turns": turns,
+        })
+
+        if (ep_idx + 1) % 10 == 0:
+            print(f"  Generated {ep_idx + 1}/{num_episodes} episodes")
 
     return episodes
 
@@ -357,7 +313,6 @@ def main():
     parser.add_argument("--output_dir", default=None, help="Output directory")
     parser.add_argument("--game_id", default="avalon", help="Game plugin to use")
     parser.add_argument("--use_templates", action="store_true", help="Use template mode (no LLM for episodes)")
-    parser.add_argument("--batch_size", type=int, default=16, help="Episodes to batch for LLM calls")
     parser.add_argument("--episodes_path", default=None, help="Path to saved episodes JSON (skip generation)")
     parser.add_argument("--eval_episodes_path", default=None, help="Path to saved eval episodes JSON (skip generation)")
     args = parser.parse_args()
@@ -373,11 +328,8 @@ def main():
         with open(args.episodes_path) as f:
             train_episodes = json.load(f)
     else:
-        print("\n[Step 1/6] Generating training episodes (batched)...")
-        train_episodes = generate_episodes(
-            args.episodes, game_id=args.game_id, use_llm=use_llm,
-            batch_size=args.batch_size,
-        )
+        print("\n[Step 1/6] Generating training episodes...")
+        train_episodes = generate_episodes(args.episodes, game_id=args.game_id, use_llm=use_llm)
     train_samples = episodes_to_dataset(train_episodes)
     print(f"  → {len(train_samples)} training samples from {len(train_episodes)} episodes")
 
@@ -386,11 +338,8 @@ def main():
         with open(args.eval_episodes_path) as f:
             eval_episodes = json.load(f)
     else:
-        print("\n[Step 2/6] Generating evaluation episodes (batched)...")
-        eval_episodes = generate_episodes(
-            args.eval_episodes, game_id=args.game_id, use_llm=use_llm,
-            batch_size=args.batch_size,
-        )
+        print("\n[Step 2/6] Generating evaluation episodes...")
+        eval_episodes = generate_episodes(args.eval_episodes, game_id=args.game_id, use_llm=use_llm)
     eval_samples = episodes_to_dataset(eval_episodes)
     print(f"  → {len(eval_samples)} eval samples from {len(eval_episodes)} episodes")
 
