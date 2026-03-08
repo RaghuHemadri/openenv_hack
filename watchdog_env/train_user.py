@@ -150,17 +150,69 @@ def generate_episodes(
     return episodes
 
 
-def episodes_to_dataset(episodes: list[dict]) -> list[dict]:
-    """Flatten episodes into individual training samples."""
-    samples = []
+def _clean_think_blocks(text: str) -> str:
+    """Strip <think>...</think> CoT leakage from turn content.
+
+    The episode data contains raw <think> chain-of-thought from the Qwen3 model.
+    For FLAG turns this is the mutator's reasoning ("the user wants a factual
+    error...") and for PASS turns it's normal player strategy.
+    Stripping this noise forces the model to focus on actual game content.
+    """
+    import re
+    # Remove closed <think>...</think> blocks entirely
+    text = re.sub(r'<think>.*?</think>', '', text, flags=re.DOTALL)
+    # Remove orphan tags
+    text = text.replace('<think>', '').replace('</think>', '')
+    # Collapse excessive whitespace
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def episodes_to_dataset(episodes: list[dict], upsample_minority: bool = True) -> list[dict]:
+    """Flatten episodes into individual training samples with preprocessing.
+
+    Applies two critical fixes:
+    1. Strips <think> CoT blocks that leak mutator instructions into turns
+    2. Optionally upsamples FLAG samples to counteract the ~9:1 class imbalance
+    """
+    flag_samples = []
+    pass_samples = []
     for ep in episodes:
         for turn in ep["turns"]:
-            samples.append({
-                "prompt": turn["prompt"],
+            # Clean <think> blocks from prompt messages
+            cleaned_prompt = []
+            for msg in turn["prompt"]:
+                cleaned_prompt.append({
+                    "role": msg["role"],
+                    "content": _clean_think_blocks(msg["content"]),
+                })
+            sample = {
+                "prompt": cleaned_prompt,
                 "ground_truth": turn["ground_truth"],
                 "error_type": turn["error_type"],
                 "has_error": turn["has_error"],
-            })
+            }
+            if turn["ground_truth"] == "FLAG":
+                flag_samples.append(sample)
+            else:
+                pass_samples.append(sample)
+
+    # Upsample FLAG to ~45% of total for balanced training
+    if upsample_minority and flag_samples and pass_samples:
+        target_flag_count = int(len(pass_samples) * 0.82)  # ~45% of total
+        if len(flag_samples) < target_flag_count:
+            repeats = target_flag_count // len(flag_samples)
+            remainder = target_flag_count % len(flag_samples)
+            upsampled_flags = flag_samples * repeats + random.sample(flag_samples, min(remainder, len(flag_samples)))
+        else:
+            upsampled_flags = flag_samples
+        samples = pass_samples + upsampled_flags
+        random.shuffle(samples)
+        print(f"  → Upsampled FLAG: {len(flag_samples)} → {len(upsampled_flags)} "
+              f"(total: {len(samples)}, FLAG ratio: {len(upsampled_flags)/len(samples):.1%})")
+    else:
+        samples = pass_samples + flag_samples
+
     return samples
 
 
@@ -305,7 +357,7 @@ def evaluate_model(model, tokenizer, eval_samples: list[dict], label: str = "eva
 
         with torch.no_grad():
             output_ids = model.generate(
-                **inputs, max_new_tokens=128, temperature=0.3, do_sample=True,
+                **inputs, max_new_tokens=384, temperature=0.1, do_sample=True,
             )
 
         for i, sample in enumerate(batch):
@@ -398,7 +450,7 @@ def main():
     else:
         print("\n[Step 1/6] Generating training episodes...")
         train_episodes = generate_episodes(args.episodes, game_id=args.game_id, use_llm=use_llm)
-    train_samples = episodes_to_dataset(train_episodes)
+    train_samples = episodes_to_dataset(train_episodes, upsample_minority=True)
     print(f"  → {len(train_samples)} training samples from {len(train_episodes)} episodes")
 
     if args.eval_episodes_path and Path(args.eval_episodes_path).exists():
@@ -408,7 +460,7 @@ def main():
     else:
         print("\n[Step 2/6] Generating evaluation episodes...")
         eval_episodes = generate_episodes(args.eval_episodes, game_id=args.game_id, use_llm=use_llm)
-    eval_samples = episodes_to_dataset(eval_episodes)
+    eval_samples = episodes_to_dataset(eval_episodes, upsample_minority=False)
     print(f"  → {len(eval_samples)} eval samples from {len(eval_episodes)} episodes")
 
     # Save episodes
@@ -487,14 +539,14 @@ def main():
         temperature=1.0,
         learning_rate=2e-4,
         weight_decay=0.001,
-        warmup_ratio=0.1,
-        lr_scheduler_type="linear",
+        warmup_ratio=0.15,
+        lr_scheduler_type="cosine",
         optim="adamw_8bit",
         logging_steps=1,
         per_device_train_batch_size=1,
-        gradient_accumulation_steps=4,
-        num_generations=4,
-        max_completion_length=128,
+        gradient_accumulation_steps=8,
+        num_generations=6,
+        max_completion_length=384,
         max_steps=args.train_steps,
         save_steps=args.train_steps,
         report_to="none",
