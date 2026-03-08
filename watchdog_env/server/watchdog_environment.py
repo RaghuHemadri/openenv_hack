@@ -145,14 +145,19 @@ class WatchDogMultiTurnEnvironment(
         self._plugin.reset(seed=seed, config=config)
         plugin_state = self._plugin.get_state()
         game_state = plugin_state.metadata.get("game_state")
-        alive_count = len(game_state.alive_players) if game_state else 6
+        alive_count = len(game_state.alive_players) if game_state else 2
 
-        # Initialize mutation tracking for avalon (Werewolf turns only)
-        if self._game_id == "avalon" and self._use_mutations and game_state:
-            wolf_count = len(game_state.alive_wolves) if hasattr(game_state, "alive_wolves") else 2
-            cfg = plugin_state.config
-            num_rounds = cfg.get_num_rounds() if hasattr(cfg, "get_num_rounds") else 2
-            start_episode(wolf_count=wolf_count, num_rounds=num_rounds)
+        # Initialize mutation tracking
+        if self._use_mutations:
+            if self._game_id == "avalon" and game_state:
+                wolf_count = len(game_state.alive_wolves) if hasattr(game_state, "alive_wolves") else 2
+                cfg = plugin_state.config
+                num_rounds = cfg.get_num_rounds() if hasattr(cfg, "get_num_rounds") else 2
+                start_episode(game_id="avalon", wolf_count=wolf_count, num_rounds=num_rounds)
+            elif self._game_id == "cicero":
+                cfg = plugin_state.config
+                num_steps = cfg.num_steps if hasattr(cfg, "num_steps") else 5
+                start_episode(game_id="cicero", num_steps=num_steps)
 
         self._episode_reward = 0.0
         self._questions_remaining = self.MAX_QUESTIONS_PER_EPISODE
@@ -236,6 +241,7 @@ class WatchDogMultiTurnEnvironment(
                 error_detail=self._current_error_detail,
                 level=self._state.current_level,
                 context={"turn": self._current_turn},
+                game_id=self._game_id,
             )
             self._phase = "question_response"
             return self._build_observation(
@@ -304,26 +310,49 @@ class WatchDogMultiTurnEnvironment(
         has_error = False
         error_detail = None
 
-        # Apply mutations for avalon (Werewolf turns only)
-        if self._use_mutations and self._game_id == "avalon":
-            speaker_role = turn.metadata.get("role", "")
-            context = {
-                "turn": turn.metadata,
-                "speaker_id": turn.agent_id,
-                "day": turn.metadata.get("day"),
-                "round_idx": turn.metadata.get("round_idx"),
-            }
-            displayed_response, has_error, error_detail = maybe_mutate(
-                clean_response=clean_response,
-                speaker_role=speaker_role,
-                level=self._state.current_level,
-                context=context,
-            )
-            # Reflect mutated state as the canonical game state so subsequent
-            # players respond to what the overseer saw (not the clean version)
-            game_state = plugin_state.metadata.get("game_state")
-            if game_state and game_state.conversation_log and displayed_response != clean_response:
-                game_state.conversation_log[-1]["message"] = displayed_response
+        # Apply mutations
+        if self._use_mutations:
+            if self._game_id == "avalon":
+                speaker_role = turn.metadata.get("role", "")
+                context = {
+                    "turn": turn.metadata,
+                    "speaker_id": turn.agent_id,
+                    "day": turn.metadata.get("day"),
+                    "round_idx": turn.metadata.get("round_idx"),
+                }
+                displayed_response, has_error, error_detail = maybe_mutate(
+                    clean_response=clean_response,
+                    speaker_role=speaker_role,
+                    level=self._state.current_level,
+                    context=context,
+                    game_id="avalon",
+                )
+                # Reflect mutated state as the canonical game state so subsequent
+                # players respond to what the overseer saw (not the clean version)
+                game_state = plugin_state.metadata.get("game_state")
+                if game_state and game_state.conversation_log and displayed_response != clean_response:
+                    game_state.conversation_log[-1]["message"] = displayed_response
+            elif self._game_id == "cicero":
+                context = {
+                    "turn": turn.metadata,
+                    "speaker_id": turn.agent_id,
+                    "step_index": step_index,
+                    "season": turn.metadata.get("season"),
+                    "region": turn.metadata.get("region"),
+                    "domain_name": turn.metadata.get("domain_name"),
+                    "domain_desc": turn.metadata.get("domain_desc"),
+                    "counterpart": turn.metadata.get("counterpart"),
+                }
+                displayed_response, has_error, error_detail = maybe_mutate(
+                    clean_response=clean_response,
+                    speaker_role="",
+                    level=self._state.current_level,
+                    context=context,
+                    game_id="cicero",
+                )
+                # Reflect mutated state in conversation_log
+                if plugin_state.conversation_log and displayed_response != clean_response:
+                    plugin_state.conversation_log[-1]["message"] = displayed_response
 
         self._current_response = displayed_response
         self._current_has_error = has_error

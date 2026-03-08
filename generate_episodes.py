@@ -42,7 +42,7 @@ def generate_episode(seed: int, level: int, force_no_mutation: bool = False):
 
     config = LEVEL_CONFIG.get(level, LEVEL_CONFIG[2])
     wolf_count = sum(1 for p in game.state.players if p.role == "Werewolf")
-    start_episode(wolf_count, config["num_rounds"])
+    start_episode(game_id="avalon", wolf_count=wolf_count, num_rounds=config["num_rounds"])
 
     turns = []
     while not game.is_done:

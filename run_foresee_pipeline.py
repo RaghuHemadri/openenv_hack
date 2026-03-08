@@ -239,7 +239,7 @@ def generate_episodes(
         game.reset(seed=seed + ep_idx)
 
         wolf_count = sum(1 for p in game.state.players if p.role == "Werewolf")
-        start_episode(wolf_count, config["num_rounds"])
+        start_episode(game_id="avalon", wolf_count=wolf_count, num_rounds=config["num_rounds"])
 
         conversation_so_far = ""
         turn_idx = 0
