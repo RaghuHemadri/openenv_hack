@@ -365,6 +365,7 @@ def main():
     model.gradient_checkpointing_enable()
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
     print("  → Model loaded successfully")
 
     # ── Step 4: Evaluate BEFORE training ───────────────────────
@@ -387,12 +388,6 @@ def main():
 
     dataset = Dataset.from_list(grpo_data)
 
-    # Compute max prompt length
-    max_prompt_len = max(
-        len(tokenizer.apply_chat_template(s["prompt"], tokenize=True, add_generation_prompt=True))
-        for s in grpo_data[:50]  # sample for speed
-    )
-
     training_args = GRPOConfig(
         output_dir=str(output_dir / "grpo_checkpoints"),
         temperature=1.0,
@@ -405,7 +400,6 @@ def main():
         per_device_train_batch_size=1,
         gradient_accumulation_steps=4,
         num_generations=4,
-        max_prompt_length=max_prompt_len + 16,
         max_completion_length=256,
         max_steps=args.train_steps,
         save_steps=args.train_steps,
