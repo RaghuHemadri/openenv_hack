@@ -9,3 +9,7 @@ transformers>=4.40.0
 accelerate>=0.30.0
 datasets>=2.18.0
 torch>=2.0.0
+
+# Plugin dependencies (Cicero, Codenames)
+langchain-google-genai>=2.0.0
+langchain-core>=0.3.0

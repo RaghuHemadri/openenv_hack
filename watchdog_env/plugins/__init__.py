@@ -20,6 +20,13 @@ try:
 except Exception:  # optional: Cicero may depend on langchain-google-genai
     CiceroPlugin = None  # type: ignore[misc, assignment]
 
+# Auto-register Codenames so game_id="codenames" is available
+try:
+    from watchdog_env.plugins.codenames import CodenamesPlugin
+    register(CodenamesPlugin())
+except Exception:  # optional: Codenames may depend on langchain-google-genai
+    CodenamesPlugin = None  # type: ignore[misc, assignment]
+
 # Auto-register Avalon so game_id="avalon" is available
 try:
     from watchdog_env.plugins.avalon import AvalonPlugin
@@ -42,5 +49,6 @@ __all__ = [
     "list_game_ids",
     "register",
     "CiceroPlugin",
+    "CodenamesPlugin",
     "AvalonPlugin",
 ]
