@@ -13,7 +13,7 @@ import random
 from dataclasses import dataclass, field
 from typing import Any
 
-from watchdog_env.plugins.avalon.llm import get_game_play_model
+import os
 from watchdog_env.plugins.codenames.word_interactions import (
     WordInteractions,
     WordRelation,
@@ -66,7 +66,16 @@ class BoardAssignment:
 
 
 def _get_llm():
-    """Get the shared local game-play model (Qwen3 8B)."""
+    """Get Gemini if API key present, otherwise local model."""
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if api_key:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        return ChatGoogleGenerativeAI(
+            model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
+            temperature=float(os.environ.get("WATCHDOG_TEMPERATURE", "0.8")),
+            google_api_key=api_key,
+        )
+    from watchdog_env.plugins.avalon.llm import get_game_play_model
     return get_game_play_model()
 
 
