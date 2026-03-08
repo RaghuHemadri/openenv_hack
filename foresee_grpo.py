@@ -342,8 +342,13 @@ def _prompt_key(prompt: list[dict]) -> str:
 
 def _configure_backends(backend: str) -> None:
     """Set environment variables for the mutation backend."""
-    if backend == "template":
+    if backend == "template" or backend == "local":
+        # Template and local both use template-based mutations (fast).
+        # For 'local', the HF model on GPU is used for dialogue generation,
+        # not for the mutation engine.
         os.environ["WATCHDOG_USE_LLM"] = "0"
+        if backend == "local":
+            os.environ["WATCHDOG_LLM_BACKEND"] = "local"
     else:
         os.environ["WATCHDOG_USE_LLM"] = "1"
         os.environ["WATCHDOG_LLM_BACKEND"] = backend
@@ -356,11 +361,14 @@ def _configure_backends(backend: str) -> None:
     from watchdog_env.envs import avalon as _avalon_mod
     _avalon_mod._llm_instance = None
 
-    # Only let the real LangChain LLM generate Avalon player dialogue
-    # when backend is "gemini" (API available).  For "template" and
-    # "local" (which needs langchain_openai + a running server), fall
-    # through to the fast template monkey-patch below.
-    if backend == "gemini":
+    # Reset Cicero LLM singleton so it picks up new backend
+    global _cicero_llm_instance
+    _cicero_llm_instance = None
+
+    # Only let the real LLM generate Avalon player dialogue when
+    # backend is "gemini" (API) or "local" (HF on GPU).
+    # For "template", fall through to the fast template monkey-patch.
+    if backend == "gemini" or backend == "local":
         return
 
     # --- Template fallback for player response generation (fast) ---
@@ -535,11 +543,22 @@ _cicero_llm_instance = None
 
 
 def _get_cicero_llm():
-    """Get or create a Gemini LLM instance for Cicero turn generation."""
+    """Get or create an LLM instance for Cicero turn generation.
+
+    Supports gemini (API) and local (HuggingFace on GPU) backends.
+    """
     global _cicero_llm_instance
     if _cicero_llm_instance is not None:
         return _cicero_llm_instance
 
+    backend = os.environ.get("WATCHDOG_LLM_BACKEND", "gemini").lower()
+
+    if backend == "local":
+        from watchdog_env.envs.avalon import _get_local_hf_llm
+        _cicero_llm_instance = _get_local_hf_llm()
+        return _cicero_llm_instance
+
+    # Default: Gemini API
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
         raise RuntimeError(
@@ -770,6 +789,12 @@ def _generate_cicero_episodes(
                 if backend == "template":
                     clean_response = _cicero_template_response(
                         power, other, season, region, domain_desc, is_opening,
+                    )
+                elif backend == "local":
+                    # Use local HF model on GPU — same interface as Gemini
+                    clean_response = _cicero_gemini_response(
+                        power, other, season, region, domain_desc,
+                        is_opening, transcript_so_far=conversation_so_far,
                     )
                 else:
                     clean_response = _cicero_gemini_response(
