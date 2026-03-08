@@ -584,7 +584,15 @@ def main():
 
     # ── Step 6: Evaluate AFTER training ────────────────────────
     print("\n[Step 6/6] Evaluating AFTER training...")
-    metrics_after = evaluate_model(model, tokenizer, eval_samples, label="after_training")
+    # Free trainer state and clear VRAM before eval
+    del trainer
+    import gc
+    gc.collect()
+    import torch as _t
+    if _t.cuda.is_available():
+        _t.cuda.empty_cache()
+    model.eval()
+    metrics_after = evaluate_model(model, tokenizer, eval_samples, label="after_training", batch_size=1)
 
     # ── Comparison Table ────────────────────────────────────────
     print("\n" + "=" * 60)
@@ -620,5 +628,47 @@ def main():
     print(f"\nResults saved to {results_path}")
 
 
+def eval_only():
+    """Standalone evaluation of a saved adapter on eval episodes."""
+    parser = argparse.ArgumentParser(description="Evaluate a trained WatchDog adapter")
+    parser.add_argument("--model", default="Qwen/Qwen3-8B", help="Base model name")
+    parser.add_argument("--adapter_path", required=True, help="Path to saved LoRA adapter")
+    parser.add_argument("--eval_episodes_path", required=True, help="Path to eval episodes JSON")
+    parser.add_argument("--batch_size", type=int, default=1, help="Eval batch size")
+    args = parser.parse_args()
+
+    import torch
+    from transformers import AutoModelForCausalLM, AutoTokenizer
+    from peft import PeftModel
+
+    print(f"Loading eval episodes from {args.eval_episodes_path}...")
+    with open(args.eval_episodes_path) as f:
+        eval_episodes = json.load(f)
+    eval_samples = episodes_to_dataset(eval_episodes, upsample_minority=False)
+    print(f"  → {len(eval_samples)} eval samples")
+
+    print(f"Loading base model: {args.model}...")
+    model = AutoModelForCausalLM.from_pretrained(
+        args.model, torch_dtype=torch.bfloat16, device_map="auto",
+        attn_implementation="flash_attention_2",
+    )
+    tokenizer = AutoTokenizer.from_pretrained(args.model)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+
+    print(f"Loading adapter from {args.adapter_path}...")
+    model = PeftModel.from_pretrained(model, args.adapter_path)
+    model.eval()
+
+    metrics = evaluate_model(model, tokenizer, eval_samples, label="trained_adapter", batch_size=args.batch_size)
+    print(json.dumps(metrics, indent=2, default=str))
+
+
 if __name__ == "__main__":
-    main()
+    import sys
+    if "--eval_only" in sys.argv:
+        sys.argv.remove("--eval_only")
+        eval_only()
+    else:
+        main()
