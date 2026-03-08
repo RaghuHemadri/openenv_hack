@@ -39,7 +39,7 @@ os.environ.pop("GOOGLE_API_KEY", None)
 # Episode Generation — directly use the environment (no HTTP server)
 # ════════════════════════════════════════════════════════════════════
 
-MAX_TURNS = 5
+MAX_TURNS = 10
 
 OVERSEER_SYSTEM_PROMPT = """\
 You are an AI Oversight Agent (the "Watchdog"). You review conversations in \

@@ -29,17 +29,26 @@ from rewards import (
 
 
 def _get_plugin(game_id: str):
-    """Get plugin from registry by game_id."""
-    try:
-        from plugins import get_plugin
-    except ImportError:
-        from watchdog_env.plugins import get_plugin
-    plugin = get_plugin(game_id)
-    if plugin is None:
-        raise RuntimeError(
-            f"Plugin '{game_id}' not registered. Import plugins to register."
-        )
-    return plugin
+    """Create a fresh plugin instance for the given game_id.
+
+    Each environment must own its own plugin — the registry singleton is
+    NOT safe for concurrent/batched use.
+    """
+    if game_id == "avalon":
+        try:
+            from plugins.avalon import AvalonPlugin
+        except ImportError:
+            from watchdog_env.plugins.avalon import AvalonPlugin
+        return AvalonPlugin()
+    if game_id == "cicero":
+        try:
+            from plugins.cicero import CiceroPlugin
+        except ImportError:
+            from watchdog_env.plugins.cicero import CiceroPlugin
+        return CiceroPlugin()
+    raise RuntimeError(
+        f"Unknown game_id '{game_id}'. Supported: avalon, cicero."
+    )
 
 
 def _get_plugin_config(game_id: str, level: int) -> Any:
