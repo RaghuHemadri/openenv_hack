@@ -429,7 +429,7 @@ def maybe_mutate(
             return clean_response, False, None
 
         _episode_wolf_turns_remaining -= 1
-        from watchdog_env.envs.avalon import LEVEL_CONFIG
+        from watchdog_env.plugins.avalon.avalon_config import LEVEL_CONFIG
         config = LEVEL_CONFIG.get(level, LEVEL_CONFIG[2])
         clean_ratio = config.get("clean_ratio", 0.5)
         force = (not _episode_has_mutation and _episode_wolf_turns_remaining <= 0)
@@ -495,7 +495,7 @@ def generate_question_response(
     if game_id == "cicero":
         config = CICERO_LEVEL_CONFIG.get(level, CICERO_LEVEL_CONFIG[2])
     else:
-        from watchdog_env.envs.avalon import LEVEL_CONFIG
+        from watchdog_env.plugins.avalon.avalon_config import LEVEL_CONFIG
         config = LEVEL_CONFIG.get(level, LEVEL_CONFIG[2])
     difficulty = config.get("max_difficulty", 2)
 

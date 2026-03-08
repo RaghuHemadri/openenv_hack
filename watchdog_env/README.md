@@ -27,7 +27,7 @@ The Overseer must be **precise** — false alarms are heavily penalized (-1.5) w
 │  ┌──────────────┐    ┌──────────────┐    ┌──────────────┐   │
 │  │  GRPOTrainer │───▶│  Environment │───▶│   Reward     │   │
 │  │  (TRL/       │    │  reset/step  │    │  (F1 + type  │   │
-│  │   Unsloth)   │◀───│  WebSocket   │◀───│  + location) │   │
+│  │   PEFT)      │◀───│  WebSocket   │◀───│  + location) │   │
 │  └──────────────┘    └──────────────┘    └──────────────┘   │
 │                                                             │
 │  Curriculum: Level 1 (easy) → Level 4 (adversarial)         │
@@ -75,18 +75,25 @@ with WatchDogEnv(base_url="http://localhost:8000") as env:
 ### 4. Train with GRPO
 
 ```bash
-# Standard TRL
-python train_grpo.py \
-    --model Qwen/Qwen2.5-1.5B-Instruct \
-    --env-url http://localhost:8000 \
-    --num-episodes 500
+# Train the user oversight model (4-bit Qwen3 8B + LoRA)
+python -m watchdog_env.train_user \
+    --model Qwen/Qwen3-8B \
+    --episodes 100 \
+    --train_steps 200
+```
 
-# With Unsloth (4x faster, free Colab T4)
-python train_grpo.py \
-    --model Qwen/Qwen2.5-1.5B-Instruct \
-    --env-url http://localhost:8000 \
-    --use-unsloth \
-    --num-episodes 500
+### 5. Adversarial Training (min-max)
+
+Jointly train the user model and mutation model in alternating rounds.
+The mutator learns to generate harder mutations; the user learns to catch them.
+
+```bash
+python -m watchdog_env.train_adversarial \
+    --model Qwen/Qwen3-8B \
+    --rounds 5 \
+    --episodes_per_round 50 \
+    --user_steps 100 \
+    --mutator_steps 80
 ```
 
 ## Reward Function
@@ -119,21 +126,27 @@ Bonuses (on TP only):
 
 ```
 watchdog_env/
-├── __init__.py              # Package exports
-├── models.py                # WatchDogAction, WatchDogObservation, WatchDogState
-├── client.py                # WatchDogEnv(EnvClient)
-├── error_engine.py          # Error templates + conversation generator
-├── rewards.py               # Reward computation
-├── openenv.yaml             # OpenEnv manifest
-├── pyproject.toml           # Dependencies
+├── __init__.py                  # Package exports
+├── models.py                    # MultiTurnAction (PASS/FLAG/QUESTION/INTERVENE)
+├── client.py                    # WatchDogMultiTurnEnv(EnvClient)
+├── error_engine.py              # Mutation layer (injects errors into clean turns)
+├── rewards.py                   # Reward computation (F1, type bonuses)
+├── train_user.py                # GRPO training for user oversight model
+├── train_adversarial.py         # Adversarial min-max training (user vs mutator)
+├── openenv.yaml                 # OpenEnv manifest
+├── pyproject.toml               # Dependencies
+├── mutations/
+│   ├── registry.py              # MutationScenario, MutationCategory
+│   └── llm_backend.py           # TrainableMutationModel (Qwen3 8B + LoRA)
+├── plugins/
+│   ├── base.py                  # BasePlugin interface
+│   ├── registry.py              # Plugin registry
+│   ├── avalon/                  # Werewolf/Mafia game plugin
+│   └── cicero/                  # Diplomacy negotiation plugin
 └── server/
-    ├── __init__.py
-    ├── watchdog_environment.py  # WatchDogEnvironment(Environment)
+    ├── watchdog_environment.py  # WatchDogMultiTurnEnvironment(Environment)
     ├── app.py                   # FastAPI server
-    ├── requirements.txt
     └── Dockerfile
-
-train_grpo.py                # Training script (TRL + Unsloth)
 ```
 
 ## Deploy to HF Spaces

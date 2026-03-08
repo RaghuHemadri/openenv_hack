@@ -1,7 +1,7 @@
-"""Avalon (Werewolf) multi-agent plugin. Self-contained Cicero-style implementation.
+"""Avalon (Werewolf) multi-agent plugin. Self-contained implementation.
 
-Uses game logic from envs.avalon. Implements MultiAgentSystemPlugin with
-AgentTurn (display_name, moderator_prompt) from shared models.
+Implements MultiAgentSystemPlugin with AgentTurn (display_name, moderator_prompt)
+from shared models.
 """
 
 from __future__ import annotations
@@ -13,22 +13,22 @@ from typing import Any
 from watchdog_env.models import AgentTurn, MultiAgentConfig, MultiAgentState, MultiAgentStep
 from watchdog_env.plugins.base import MultiAgentSystemPlugin
 
-from watchdog_env.envs.avalon import (
-    LEVEL_CONFIG,
+from .avalon_config import AvalonConfig, LEVEL_CONFIG
+from .avalon_models import (
+    GameState,
+    Player,
     create_game,
+    _DAY_EVENTS,
+    _DAY_EVENTS_NO_DEATH,
+    _DAY_OPENERS,
 )
-from watchdog_env.envs.avalon import _generate_player_response_llm
-from watchdog_env.envs.avalon import GameState, Player
-
-from .avalon_config import AvalonConfig
+from .llm import _generate_player_response_llm
 
 logger = logging.getLogger(__name__)
 
 
 def _build_moderator_prompt(state: GameState, speaker: Player) -> str:
     """Build moderator prompt for this speaker's turn."""
-    from watchdog_env.envs.avalon import _DAY_EVENTS, _DAY_EVENTS_NO_DEATH, _DAY_OPENERS
-
     if state.round_idx == 0 and state.day == 1:
         event = random.choice(_DAY_EVENTS_NO_DEATH)
     elif state.round_idx == 0:

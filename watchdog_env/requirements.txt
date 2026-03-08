@@ -1,11 +1,15 @@
 openenv-core[core]>=0.2.0
 fastapi>=0.115.0
-langchain-google-genai>=2.0.0
-langchain-core>=0.3.0
 pydantic>=2.0.0
 uvicorn>=0.24.0
-trl>=0.28.0
-transformers>=4.40.0
+torch>=2.4.0
+transformers>=4.50.0
 accelerate>=0.30.0
+bitsandbytes>=0.44.0
+peft>=0.14.0
+trl>=0.15.0
 datasets>=2.18.0
-torch>=2.0.0
+# Optional: Gemini backend (not used by default)
+# langchain-google-genai>=2.0.0
+# langchain-core>=0.3.0
+# google-genai

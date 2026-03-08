@@ -1,7 +1,8 @@
-"""Cicero multi-agent plugin: Diplomacy-style negotiation via LangChain + Gemini.
+"""Cicero multi-agent plugin: Diplomacy-style negotiation.
 
-Implements all MultiAgentSystemPlugin methods. generate_step is based on state history
-(turns_so_far) for LLM context. Requires GEMINI_API_KEY or GOOGLE_API_KEY for live runs.
+Supports two backends (configured via WATCHDOG_LLM_BACKEND env var):
+  - "local"  (default): shared Qwen3 8B game-play model from avalon/llm.py
+  - "gemini": Google Gemini via langchain-google-genai (kept but not default)
 """
 
 from __future__ import annotations
@@ -19,20 +20,20 @@ from watchdog_env.plugins.base import (
 from watchdog_env.plugins.cicero.cicero_config import CICERO_POWERS, CiceroConfig
 
 
-def _get_langchain_llm():
-    """Return ChatGoogleGenerativeAI. Raises if API key missing or langchain unavailable."""
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        raise RuntimeError(
-            "Cicero plugin requires GEMINI_API_KEY or GOOGLE_API_KEY. No template fallback."
-        )
-    from langchain_google_genai import ChatGoogleGenerativeAI
-    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
-    return ChatGoogleGenerativeAI(
-        model=model,
-        temperature=0.85,
-        google_api_key=api_key,
-    )
+def _get_llm():
+    """Get the configured LLM backend. Default: local Qwen3 8B."""
+    backend = os.environ.get("WATCHDOG_LLM_BACKEND", "local").lower()
+    if backend == "gemini":
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if api_key:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+            return ChatGoogleGenerativeAI(
+                model=model, temperature=0.85, google_api_key=api_key,
+            )
+    # Default: shared local game-play model
+    from watchdog_env.plugins.avalon.llm import get_game_play_model
+    return get_game_play_model()
 
 
 def _format_conversation_log(entries: list[dict]) -> str:
@@ -112,7 +113,7 @@ class CiceroPlugin(MultiAgentSystemPlugin):
             temperature = 0.85
 
         done = step_index >= num_steps - 1
-        llm = _get_langchain_llm()
+        llm = _get_llm()
 
         # Use conversation_log for context
         transcript_so_far = _format_conversation_log(get_conversation_log(self._state))
@@ -152,10 +153,13 @@ class CiceroPlugin(MultiAgentSystemPlugin):
                     f"Send your first message (proposal, offer, or diplomatic overture). Output only your message."
                 )
 
-            from langchain_core.messages import HumanMessage, SystemMessage
-            langchain_messages = [SystemMessage(content=system), HumanMessage(content=user)]
+            # Use dict messages — works with both local GamePlayModel and LangChain
+            messages = [
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ]
 
-            response = llm.invoke(langchain_messages)
+            response = llm.invoke(messages)
             text = response.content if hasattr(response, "content") else str(response)
             if not (text and isinstance(text, str)):
                 raise RuntimeError(

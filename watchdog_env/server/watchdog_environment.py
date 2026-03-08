@@ -123,14 +123,12 @@ class WatchDogMultiTurnEnvironment(
         if self._use_llm:
             os.environ.pop("WATCHDOG_AVALON_USE_TEMPLATE", None)
             os.environ.pop("WATCHDOG_CICERO_USE_TEMPLATE", None)
-            for mod_name in ("watchdog_env.envs.avalon", "envs.avalon"):
-                try:
-                    m = importlib.import_module(mod_name)
-                    if hasattr(m, "_llm_instance"):
-                        m._llm_instance = None
-                    break
-                except ImportError:
-                    continue
+            try:
+                m = importlib.import_module("watchdog_env.plugins.avalon.llm")
+                if hasattr(m, "_llm_instance"):
+                    m._llm_instance = None
+            except ImportError:
+                pass
         else:
             os.environ["WATCHDOG_AVALON_USE_TEMPLATE"] = "1"
             os.environ["WATCHDOG_CICERO_USE_TEMPLATE"] = "1"

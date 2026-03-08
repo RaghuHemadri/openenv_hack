@@ -12,6 +12,13 @@ dependencies = [
     "fastapi>=0.115.0",
     "pydantic>=2.0.0",
     "uvicorn>=0.24.0",
+    "torch>=2.4.0",
+    "transformers>=4.50.0",
+    "accelerate>=0.30.0",
+    "bitsandbytes>=0.44.0",
+    "peft>=0.14.0",
+    "trl>=0.15.0",
+    "datasets>=2.18.0",
 ]
 
 [project.optional-dependencies]
@@ -20,9 +27,10 @@ dev = [
     "pytest-cov>=4.0.0",
     "httpx>=0.25.0",
 ]
-plugins = [
+gemini = [
     "langchain-google-genai>=2.0.0",
     "langchain-core>=0.3.0",
+    "google-genai",
 ]
 
 [project.scripts]

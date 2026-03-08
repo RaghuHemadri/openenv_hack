@@ -2,8 +2,8 @@
 
 from .client import WatchDogMultiTurnEnv
 from .models import MultiTurnAction, MultiTurnObservation, MultiTurnState
-from .envs import load_env, AVAILABLE_ENVS
-from .envs.avalon import AvalonGame
+from .plugins.avalon import AvalonGame
+from .plugins.registry import get_plugin, list_game_ids
 
 __all__ = [
     # Multi-turn oversight
@@ -13,6 +13,6 @@ __all__ = [
     "WatchDogMultiTurnEnv",
     # Environments
     "AvalonGame",
-    "load_env",
-    "AVAILABLE_ENVS",
+    "get_plugin",
+    "list_game_ids",
 ]
