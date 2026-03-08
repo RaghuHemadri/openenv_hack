@@ -23,7 +23,7 @@ class CiceroConfig(MultiAgentConfig):
 
     num_steps: int = 3
     powers: list[str] | None = None  # None = use all seven
-    model_name: str = "gemini-2.0-flash"
+    model_name: str = "gemini-2.5-flash"
     temperature: float = 0.85
 
     def get_powers(self) -> list[str]:

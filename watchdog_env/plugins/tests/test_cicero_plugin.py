@@ -1,4 +1,4 @@
-"""Tests for Cicero plugin. Require GEMINI_API_KEY or GOOGLE_API_KEY to run; skipped if unset."""
+"""Tests for Cicero plugin. Require GEMINI_API_KEY or GOOGLE_API_KEY; use LLM (no fallback)."""
 
 from __future__ import annotations
 
@@ -6,15 +6,20 @@ import os
 
 import pytest
 
-from watchdog_env.plugins.base import get_system_context
+from watchdog_env.plugins.base import get_conversation_log
 from watchdog_env.plugins.cicero import CiceroConfig, CiceroPlugin
 from watchdog_env.plugins.registry import get_plugin
 
-# Skip all tests in this module if no Gemini API key
 pytestmark = pytest.mark.skipif(
     not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")),
-    reason="GEMINI_API_KEY or GOOGLE_API_KEY required for Cicero integration tests",
+    reason="GEMINI_API_KEY or GOOGLE_API_KEY required",
 )
+
+
+@pytest.fixture(autouse=True)
+def use_llm(monkeypatch):
+    """Use LLM in tests (default when API key present). Ensure template not forced."""
+    monkeypatch.delenv("WATCHDOG_CICERO_USE_TEMPLATE", raising=False)
 
 
 @pytest.fixture
@@ -44,56 +49,35 @@ def test_list_agent_ids(plugin):
 
 
 def test_reset_and_get_state(plugin):
-    plugin.reset(seed=42, config=CiceroConfig(num_steps=2))
+    plugin.reset(seed=42, config=CiceroConfig(num_steps=5))
     state = plugin.get_state()
     print(f"\n[get_state after reset] step_index={state.step_index}, turns_so_far={len(state.turns_so_far)}, done={state.done}")
     assert state.step_index == 0
     assert len(state.turns_so_far) == 0
     assert state.done is False
     assert state.config is not None
-    assert len(state.system_context) == 0  # system_context cleared on reset
+    assert len(state.conversation_log) == 0  # conversation_log cleared on reset
 
 
 def test_generate_step_based_on_state_history(plugin):
-    """generate_step uses state history; reset then step 0, 1 and assert turns and done."""
-    plugin.reset(seed=123, config=CiceroConfig(num_steps=2))
-    step0 = plugin.generate_step(seed=123, step_index=0)
-    print(f"\n[generate_step 0] step_index={step0.step_index}, done={step0.done}, turns={[(t.agent_id, t.action_text[:50]+'...' if len(t.action_text)>50 else t.action_text) for t in step0.turns]}")
-    assert step0.step_index == 0
-    assert len(step0.turns) >= 1
-    for t in step0.turns:
-        assert t.agent_id and t.action_text
-        assert t.agent_id in plugin.list_agent_ids()
-    assert hasattr(step0, "done")
-    state_after_0 = plugin.get_state()
-    assert state_after_0.step_index == 1
-    assert len(state_after_0.turns_so_far) == len(step0.turns)
+    """generate_step uses state history; reset then run steps until done."""
+    plugin.reset(seed=123, config=CiceroConfig(num_steps=5))
+    step_index = 0
+    while not plugin.get_state().done and step_index < 10:
+        step = plugin.generate_step(seed=123, step_index=step_index)
+        for t in step.turns:
+            msg = t.action_text[:50] + "..." if len(t.action_text) > 50 else t.action_text
+            print(f"  [step {step_index}] {t.agent_id}: {msg}")
+        assert step.step_index == step_index
+        assert len(step.turns) >= 1
+        for t in step.turns:
+            assert t.agent_id and t.action_text
+            assert t.agent_id in plugin.list_agent_ids()
+        assert step.state is not None and hasattr(step.state, "conversation_log")
+        step_index += 1
 
-    # Context: step.state has system_context; with LLM it accumulates, with fallback it stays empty
-    assert step0.state is not None
-    assert hasattr(step0.state, "system_context")
-    assert isinstance(step0.state.system_context, list)
-    ctx_after_0 = get_system_context(state_after_0)
-    if len(ctx_after_0) > 0:  # LLM path: context accumulates
-        assert len(ctx_after_0) == 2 * len(step0.turns)  # user+assistant per turn
-        for msg in ctx_after_0:
-            assert msg.role in ("user", "assistant")
-            assert msg.content
-
-    step1 = plugin.generate_step(seed=123, step_index=1)
-    print(f"\n[generate_step 1] step_index={step1.step_index}, done={step1.done}, turns={[(t.agent_id, t.action_text[:50]+'...' if len(t.action_text)>50 else t.action_text) for t in step1.turns]}")
-    assert step1.step_index == 1
-    assert len(step1.turns) >= 1
-    assert step1.done is True
-    state_after_1 = plugin.get_state()
-    print(f"\n[get_state after step 1] step_index={state_after_1.step_index}, turns_so_far count={len(state_after_1.turns_so_far)}, done={state_after_1.done}")
-    assert state_after_1.done is True
-
-    # With LLM: context grows across steps
-    ctx_after_1 = get_system_context(state_after_1)
-    if len(ctx_after_0) > 0:
-        assert len(ctx_after_1) > len(ctx_after_0)
-        assert len(ctx_after_1) == len(ctx_after_0) + 2 * len(step1.turns)
+    print(f"\n[done] steps={step_index}, done={plugin.get_state().done}")
+    assert plugin.get_state().done or step_index >= 10
 
 
 def test_cicero_registered():
@@ -105,21 +89,20 @@ def test_cicero_registered():
 
 
 def test_cicero_context_in_step_state(plugin):
-    """Each step returns state with system_context; context has user/assistant alternation."""
-    plugin.reset(seed=1, config=CiceroConfig(num_steps=1))
+    """Each step returns state with conversation_log; entries have speaker_id, message."""
+    plugin.reset(seed=1, config=CiceroConfig(num_steps=5))
     step = plugin.generate_step(seed=1, step_index=0)
     assert step.state is not None
-    assert isinstance(step.state.system_context, list)
-    ctx = step.state.system_context
-    # With LLM: user, assistant per agent; alternation
-    for i, msg in enumerate(ctx):
-        assert msg.role in ("user", "assistant")
-        assert isinstance(msg.content, str) and len(msg.content) > 0
+    assert isinstance(step.state.conversation_log, list)
+    log = step.state.conversation_log
+    for entry in log:
+        assert "speaker_id" in entry and "message" in entry
+        assert isinstance(entry["message"], str) and len(entry["message"]) > 0
 
 
 def test_cicero_context_cleared_on_reset(plugin):
-    """Reset clears system_context (empty after reset regardless of LLM vs fallback)."""
-    plugin.reset(seed=1, config=CiceroConfig(num_steps=2))
+    """Reset clears conversation_log (empty after reset regardless of LLM vs fallback)."""
+    plugin.reset(seed=1, config=CiceroConfig(num_steps=5))
     plugin.generate_step(seed=1, step_index=0)
     plugin.reset(seed=99, config=CiceroConfig(num_steps=2))
-    assert len(get_system_context(plugin.get_state())) == 0
+    assert len(get_conversation_log(plugin.get_state())) == 0

@@ -1,87 +1,54 @@
-"""Base types and interface for multi-agent system plugins.
+"""Base interface for multi-agent system plugins.
 
 Primitive is a step; each step can have multi-agent turns. Plugins implement
 MultiAgentSystemPlugin and use MultiAgentState (history) when generating each step.
+
+Context is a plain conversation_log: list of {speaker_id, speaker_display, message, ...}.
+Shared types (AgentTurn, MultiAgentStep, etc.) live in watchdog_env.models.
 """
 
 from __future__ import annotations
 
 from abc import ABC, abstractmethod
-from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any
+
+from watchdog_env.models import (
+    AgentTurn,
+    ConversationLogEntry,
+    MultiAgentConfig,
+    MultiAgentState,
+    MultiAgentStep,
+)
 
 
-ContextRole = Literal["system", "user", "assistant"]
+def get_conversation_log(state: MultiAgentState) -> list[ConversationLogEntry]:
+    """Return the conversation log (plain transcript) for this run."""
+    return state.conversation_log
 
 
-@dataclass
-class ContextMessage:
-    """A single message in the system context (LLM conversation history)."""
-
-    role: ContextRole
-    content: str
-
-
-@dataclass
-class AgentTurn:
-    """A single agent's action in system text form."""
-
-    agent_id: str
-    action_text: str
-    step_index: int = 0
-    phase: str = ""
-    metadata: dict[str, Any] = field(default_factory=dict)
-
-
-@dataclass
-class MultiAgentConfig:
-    """Base config for a multi-agent system run. Plugins subclass for game-specific fields."""
-
-    pass
-
-
-@dataclass
-class MultiAgentState:
-    """Tracks system behaviour across the run. Used when generating each MultiAgentStep."""
-
-    step_index: int = 0
-    turns_so_far: list[AgentTurn] = field(default_factory=list)
-    config: MultiAgentConfig | None = None
-    done: bool = False
-    metadata: dict[str, Any] = field(default_factory=dict)
-    system_context: list[ContextMessage] = field(default_factory=list)
-
-
-def get_system_context(state: MultiAgentState) -> list[ContextMessage]:
-    """Return the full system context (LLM message history) for this run."""
-    return state.system_context
-
-
-def append_to_context(
+def append_to_conversation_log(
     state: MultiAgentState,
-    role: ContextRole,
-    content: str,
+    speaker_id: str,
+    speaker_display: str,
+    message: str,
+    moderator_prompt: str = "",
+    **extra: Any,
 ) -> None:
-    """Append a message to the system context. Used by each agent call."""
-    state.system_context.append(ContextMessage(role=role, content=content))
+    """Append an entry to the conversation log."""
+    entry: ConversationLogEntry = {
+        "speaker_id": speaker_id,
+        "speaker_display": speaker_display,
+        "message": message,
+    }
+    if moderator_prompt:
+        entry["moderator_prompt"] = moderator_prompt
+    entry.update(extra)
+    state.conversation_log.append(entry)
 
 
-def clear_system_context(state: MultiAgentState) -> None:
-    """Clear the system context. Called from reset."""
-    state.system_context.clear()
-
-
-@dataclass
-class MultiAgentStep:
-    """One step: multiple agent turns. done=True means scenario is finished."""
-
-    turns: list[AgentTurn]
-    done: bool = False
-    step_index: int = 0
-    game_id: str = ""
-    task_id: str = ""
-    domain: str = ""
-    state: MultiAgentState | None = None
+def clear_conversation_log(state: MultiAgentState) -> None:
+    """Clear the conversation log. Called from reset."""
+    state.conversation_log.clear()
 
 
 class MultiAgentSystemPlugin(ABC):
@@ -98,7 +65,7 @@ class MultiAgentSystemPlugin(ABC):
         seed: int | None = None,
         config: MultiAgentConfig | None = None,
     ) -> None:
-        """Start or restart the scenario with this seed and config. Clear state and system_context."""
+        """Start or restart the scenario with this seed and config. Clear state and conversation_log."""
         ...
 
     @abstractmethod
@@ -120,3 +87,16 @@ class MultiAgentSystemPlugin(ABC):
     def list_agent_ids(self) -> list[str]:
         """List of agent IDs (e.g. power names) for schema/docs."""
         ...
+
+
+__all__ = [
+    "AgentTurn",
+    "ConversationLogEntry",
+    "MultiAgentConfig",
+    "MultiAgentState",
+    "MultiAgentStep",
+    "MultiAgentSystemPlugin",
+    "append_to_conversation_log",
+    "clear_conversation_log",
+    "get_conversation_log",
+]
