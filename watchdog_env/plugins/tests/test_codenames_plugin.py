@@ -6,9 +6,14 @@ Tests cover:
 - Game state transitions (using mock board)
 - Word interactions serialization
 - Conversation log (matching Cicero pattern)
-- Integration tests (requires API key)
+- Integration tests
 
-Note: Most tests require GEMINI_API_KEY to be set since fallback mode was removed.
+LLM backend is configured via WATCHDOG_LLM_BACKEND env var:
+  - "local"  (default): shared Qwen3 8B game-play model from avalon/llm.py
+  - "gemini": Google Gemini via langchain-google-genai (requires API key)
+
+Tests that require LLM will use the local model by default.
+Tests marked with SKIP_WITHOUT_GPU require a GPU for the local model.
 """
 
 from __future__ import annotations
@@ -20,7 +25,6 @@ from watchdog_env.plugins.codenames.codenames_plugin import CodenamesPlugin
 from watchdog_env.plugins.codenames.board_generator import (
     generate_board,
     BoardAssignment,
-    GeminiNotAvailableError,
     BoardGenerationError,
 )
 from watchdog_env.plugins.codenames.game_state import CodenamesGameState, ClueRecord, GuessRecord
@@ -44,9 +48,24 @@ from watchdog_env.plugins.base import get_conversation_log
 from watchdog_env.plugins.registry import get_plugin, list_game_ids
 
 
-# Check if Gemini API is available
+def _has_gpu():
+    """Check if GPU is available for local model."""
+    try:
+        import torch
+        return torch.cuda.is_available()
+    except ImportError:
+        return False
+
+
+# Skip tests that require GPU for local model
+SKIP_WITHOUT_GPU = pytest.mark.skipif(
+    not _has_gpu() and os.environ.get("WATCHDOG_LLM_BACKEND", "local").lower() == "local",
+    reason="GPU not available for local model"
+)
+
+# Check if Gemini API is available (for Gemini-specific tests)
 HAS_GEMINI_API = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
-SKIP_WITHOUT_API = pytest.mark.skipif(
+SKIP_WITHOUT_GEMINI = pytest.mark.skipif(
     not HAS_GEMINI_API,
     reason="GEMINI_API_KEY or GOOGLE_API_KEY not set"
 )
@@ -168,22 +187,10 @@ class TestCodenamesConfig:
 
 
 # ============================================================================
-# Board Generation Tests (require API)
+# Board Generation Tests
 # ============================================================================
 
-class TestBoardGenerationErrors:
-    """Test board generation error handling."""
-    
-    def test_raises_without_api_key(self, monkeypatch):
-        """Should raise GeminiNotAvailableError without API key."""
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-        
-        with pytest.raises(GeminiNotAvailableError):
-            generate_board(seed=42)
-
-
-@SKIP_WITHOUT_API
+@SKIP_WITHOUT_GPU
 class TestBoardGeneration:
     """Test board generation functionality (requires API)."""
     
@@ -424,26 +431,8 @@ class TestAgentBasics:
         assert agents["blue_spymaster"].team == "blue"
 
 
-class TestAgentErrors:
-    """Test agent error handling."""
-    
-    def test_agent_raises_without_api_key(self, monkeypatch):
-        """Agent should raise GeminiNotAvailableError without API key."""
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-        
-        board = _create_mock_board()
-        game_state = CodenamesGameState(board=board)
-        
-        agent = CodenamesAgent("red_spymaster")
-        
-        from watchdog_env.plugins.codenames.agents import GeminiNotAvailableError
-        with pytest.raises(GeminiNotAvailableError):
-            agent.get_action(game_state)
-
-
-@SKIP_WITHOUT_API
-class TestAgentsWithAPI:
+@SKIP_WITHOUT_GPU
+class TestAgentsWithLLM:
     """Test agent functionality with API."""
     
     def test_spymaster_clue(self):
@@ -478,21 +467,7 @@ class TestAgentsWithAPI:
 # Plugin Integration Tests
 # ============================================================================
 
-class TestPluginErrors:
-    """Test plugin error handling."""
-    
-    def test_reset_raises_without_api_key(self, monkeypatch):
-        """Plugin reset should raise without API key."""
-        monkeypatch.delenv("GEMINI_API_KEY", raising=False)
-        monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
-        
-        plugin = CodenamesPlugin()
-        
-        with pytest.raises(GeminiNotAvailableError):
-            plugin.reset(seed=42)
-
-
-@SKIP_WITHOUT_API
+@SKIP_WITHOUT_GPU
 class TestPluginIntegration:
     """Test the plugin as a whole (requires API)."""
     
@@ -579,7 +554,7 @@ class TestPluginIntegration:
 # Game Runner Tests
 # ============================================================================
 
-@SKIP_WITHOUT_API
+@SKIP_WITHOUT_GPU
 class TestGameRunner:
     """Test game runner functionality (requires API)."""
     
@@ -621,9 +596,9 @@ class TestGameRunner:
 # Full Integration Tests with API
 # ============================================================================
 
-@SKIP_WITHOUT_API
+@SKIP_WITHOUT_GPU
 class TestFullIntegration:
-    """Full integration tests that require Gemini API key."""
+    """Full integration tests that require LLM (local or Gemini)."""
     
     def test_board_generation_with_llm(self):
         """Board generation should use LLM."""

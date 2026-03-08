@@ -1,10 +1,10 @@
 """Codenames multi-agent plugin: 4-player word guessing game.
 
-Implements MultiAgentSystemPlugin interface. Uses Gemini for board generation
-and agent decision-making. Tracks full game state and history.
+Implements MultiAgentSystemPlugin interface for Codenames board game.
 
-Requires Gemini API to be available - no fallback mode.
-Set GEMINI_API_KEY or GOOGLE_API_KEY environment variable.
+Supports two backends (configured via WATCHDOG_LLM_BACKEND env var):
+  - "local"  (default): shared Qwen3 8B game-play model from avalon/llm.py
+  - "gemini": Google Gemini via langchain-google-genai (requires API key)
 """
 
 from __future__ import annotations
@@ -23,7 +23,6 @@ from watchdog_env.plugins.codenames.codenames_config import CODENAMES_AGENTS, Co
 from watchdog_env.plugins.codenames.board_generator import (
     generate_board,
     BoardAssignment,
-    GeminiNotAvailableError,
     BoardGenerationError,
 )
 from watchdog_env.plugins.codenames.game_state import CodenamesGameState
@@ -97,7 +96,7 @@ class CodenamesPlugin(MultiAgentSystemPlugin):
         cfg.validate()
         self._config = cfg
         
-        # Generate board
+        # Generate board (uses WATCHDOG_LLM_BACKEND for LLM selection)
         board = generate_board(
             seed=seed,
             complexity_level=cfg.complexity_level,
@@ -105,8 +104,6 @@ class CodenamesPlugin(MultiAgentSystemPlugin):
             blue_words=cfg.blue_words,
             neutral_words=cfg.neutral_words,
             assassin_words=cfg.assassin_words,
-            model_name=cfg.model_name,
-            temperature=cfg.temperature,
         )
         
         # Initialize game state
@@ -117,8 +114,8 @@ class CodenamesPlugin(MultiAgentSystemPlugin):
             max_turns=cfg.max_turns,
         )
         
-        # Create agents
-        self._agents = create_agents(cfg.model_name, cfg.temperature)
+        # Create agents (uses WATCHDOG_LLM_BACKEND for LLM selection)
+        self._agents = create_agents()
         
         # Initialize plugin state with conversation_log (matching Cicero pattern)
         self._state = MultiAgentState(

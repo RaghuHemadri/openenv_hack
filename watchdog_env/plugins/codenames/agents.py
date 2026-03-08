@@ -2,7 +2,10 @@
 
 Four distinct agents: red_spymaster, red_operative, blue_spymaster, blue_operative.
 Each agent has role-specific prompts and visibility into the game state.
-Requires Gemini API to be available - no fallback mode.
+
+Supports two backends (configured via WATCHDOG_LLM_BACKEND env var):
+  - "local"  (default): shared Qwen3 8B game-play model from avalon/llm.py
+  - "gemini": Google Gemini via langchain-google-genai
 """
 
 from __future__ import annotations
@@ -19,11 +22,6 @@ from watchdog_env.plugins.codenames.game_state import CodenamesGameState, ClueRe
 logger = logging.getLogger(__name__)
 
 AgentRole = Literal["red_spymaster", "red_operative", "blue_spymaster", "blue_operative"]
-
-
-class GeminiNotAvailableError(Exception):
-    """Raised when Gemini API is not available."""
-    pass
 
 
 class AgentActionError(Exception):
@@ -47,54 +45,27 @@ class GuessAction:
     pass_turn: bool = False
 
 
-def _get_default_model() -> str:
-    """Get default model from environment or fallback."""
-    return os.environ.get("CODENAMES_MODEL", os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview"))
-
-
-def _get_default_temperature() -> float:
-    """Get default temperature from environment or fallback."""
-    return float(os.environ.get("CODENAMES_TEMPERATURE", os.environ.get("GEMINI_TEMPERATURE", "0.7")))
-
-
-def _get_langchain_llm(model_name: str | None = None, temperature: float | None = None):
-    """Return ChatGoogleGenerativeAI.
+def _get_llm():
+    """Get the configured LLM backend. Default: local Qwen3 8B.
     
-    Args:
-        model_name: Model to use. Defaults to CODENAMES_MODEL or GEMINI_MODEL env var, 
-                    or gemini-3-flash-preview
-        temperature: Temperature for generation. Defaults to CODENAMES_TEMPERATURE or 
-                     GEMINI_TEMPERATURE env var, or 0.7
-    
-    Raises:
-        GeminiNotAvailableError: If API key is not set or langchain is not available
+    Supports two backends via WATCHDOG_LLM_BACKEND env var:
+      - "local"  (default): shared Qwen3 8B game-play model
+      - "gemini": Google Gemini via langchain-google-genai
     """
-    if model_name is None:
-        model_name = _get_default_model()
-    if temperature is None:
-        temperature = _get_default_temperature()
-    
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        raise GeminiNotAvailableError(
-            "GEMINI_API_KEY or GOOGLE_API_KEY environment variable must be set. "
-            "Get an API key at https://aistudio.google.com/apikey"
-        )
-    
-    try:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        return ChatGoogleGenerativeAI(
-            model=model_name,
-            temperature=temperature,
-            google_api_key=api_key,
-        )
-    except ImportError as e:
-        raise GeminiNotAvailableError(
-            "langchain-google-genai is not installed. "
-            "Install with: pip install langchain-google-genai langchain-core"
-        ) from e
-    except Exception as e:
-        raise GeminiNotAvailableError(f"Failed to initialize Gemini LLM: {e}") from e
+    backend = os.environ.get("WATCHDOG_LLM_BACKEND", "local").lower()
+    if backend == "gemini":
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if api_key:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            model = os.environ.get("CODENAMES_MODEL", os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"))
+            temperature = float(os.environ.get("CODENAMES_TEMPERATURE", "0.7"))
+            return ChatGoogleGenerativeAI(
+                model=model, temperature=temperature, google_api_key=api_key,
+            )
+        logger.warning("Gemini requested but no API key found. Falling back to local model.")
+    # Default: shared local game-play model
+    from watchdog_env.plugins.avalon.llm import get_game_play_model
+    return get_game_play_model()
 
 
 def _format_clue_history(clue_history: list[ClueRecord]) -> str:
@@ -319,29 +290,21 @@ def _parse_guess_response(response_text: str) -> GuessAction:
 class CodenamesAgent:
     """Agent that plays a specific role in Codenames.
     
-    Requires Gemini API to be available.
+    Supports local (Qwen3 8B) or Gemini backends.
     """
     
-    def __init__(
-        self,
-        role: AgentRole,
-        model_name: str | None = None,
-        temperature: float | None = None,
-    ):
+    def __init__(self, role: AgentRole):
         self.role = role
         self.team = "red" if role.startswith("red") else "blue"
         self.is_spymaster = "spymaster" in role
-        self.model_name = model_name or _get_default_model()
-        self.temperature = temperature if temperature is not None else _get_default_temperature()
     
     def get_action(self, state: CodenamesGameState) -> ClueAction | GuessAction:
         """Get the agent's action based on current game state.
         
         Raises:
-            GeminiNotAvailableError: If Gemini API is not available
             AgentActionError: If agent fails to produce a valid action
         """
-        llm = _get_langchain_llm(self.model_name, self.temperature)
+        llm = _get_llm()
         
         if self.is_spymaster:
             return self._get_clue_action(state, llm)
@@ -356,18 +319,21 @@ class CodenamesAgent:
         """
         prompt = _build_spymaster_prompt(state, self.team)
         
+        system_content = (
+            "You are playing Codenames as a Spymaster. "
+            "Your goal is to help your teammate find your team's words "
+            "while avoiding the opponent's words and the assassin. "
+            "Respond only with the requested JSON format."
+        )
+        
+        # Use dict messages — works with both local GamePlayModel and LangChain
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": prompt},
+        ]
+        
         try:
-            from langchain_core.messages import HumanMessage, SystemMessage
-            
-            system_msg = SystemMessage(content=(
-                "You are playing Codenames as a Spymaster. "
-                "Your goal is to help your teammate find your team's words "
-                "while avoiding the opponent's words and the assassin. "
-                "Respond only with the requested JSON format."
-            ))
-            
-            response = llm.invoke([system_msg, HumanMessage(content=prompt)])
-            # Handle both string and list content (newer langchain versions return list for multimodal)
+            response = llm.invoke(messages)
             content = response.content if hasattr(response, "content") else str(response)
             if isinstance(content, list):
                 response_text = "".join(
@@ -376,6 +342,9 @@ class CodenamesAgent:
                 )
             else:
                 response_text = str(content)
+            
+            if not response_text.strip():
+                raise AgentActionError("LLM returned empty response for clue")
             
             action = _parse_clue_response(response_text)
             
@@ -386,7 +355,7 @@ class CodenamesAgent:
             
             return action
             
-        except (GeminiNotAvailableError, AgentActionError):
+        except AgentActionError:
             raise
         except Exception as e:
             raise AgentActionError(f"LLM clue generation failed: {e}") from e
@@ -399,18 +368,21 @@ class CodenamesAgent:
         """
         prompt = _build_operative_prompt(state, self.team)
         
+        system_content = (
+            "You are playing Codenames as an Operative. "
+            "Your goal is to guess your team's words based on clues from your Spymaster. "
+            "Avoid the assassin word at all costs. "
+            "Respond only with the requested JSON format."
+        )
+        
+        # Use dict messages — works with both local GamePlayModel and LangChain
+        messages = [
+            {"role": "system", "content": system_content},
+            {"role": "user", "content": prompt},
+        ]
+        
         try:
-            from langchain_core.messages import HumanMessage, SystemMessage
-            
-            system_msg = SystemMessage(content=(
-                "You are playing Codenames as an Operative. "
-                "Your goal is to guess your team's words based on clues from your Spymaster. "
-                "Avoid the assassin word at all costs. "
-                "Respond only with the requested JSON format."
-            ))
-            
-            response = llm.invoke([system_msg, HumanMessage(content=prompt)])
-            # Handle both string and list content (newer langchain versions return list for multimodal)
+            response = llm.invoke(messages)
             content = response.content if hasattr(response, "content") else str(response)
             if isinstance(content, list):
                 response_text = "".join(
@@ -419,6 +391,9 @@ class CodenamesAgent:
                 )
             else:
                 response_text = str(content)
+            
+            if not response_text.strip():
+                raise AgentActionError("LLM returned empty response for guess")
             
             action = _parse_guess_response(response_text)
             
@@ -430,19 +405,13 @@ class CodenamesAgent:
             
             return action
             
-        except (GeminiNotAvailableError, AgentActionError):
+        except AgentActionError:
             raise
         except Exception as e:
             raise AgentActionError(f"LLM guess generation failed: {e}") from e
 
 
-def create_agents(
-    model_name: str | None = None,
-    temperature: float | None = None,
-) -> dict[str, CodenamesAgent]:
+def create_agents() -> dict[str, CodenamesAgent]:
     """Create all four agents for a Codenames game."""
     roles: list[AgentRole] = ["red_spymaster", "red_operative", "blue_spymaster", "blue_operative"]
-    return {
-        role: CodenamesAgent(role, model_name, temperature)
-        for role in roles
-    }
+    return {role: CodenamesAgent(role) for role in roles}

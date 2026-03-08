@@ -1,7 +1,10 @@
-"""Board generator for Codenames using Gemini API.
+"""Board generator for Codenames.
 
 Generates word boards with complex semantic relationships based on complexity level.
-Requires Gemini API to be available - no fallback mode.
+
+Supports two backends (configured via WATCHDOG_LLM_BACKEND env var):
+  - "local"  (default): shared Qwen3 8B game-play model from avalon/llm.py
+  - "gemini": Google Gemini via langchain-google-genai
 """
 
 from __future__ import annotations
@@ -23,7 +26,7 @@ logger = logging.getLogger(__name__)
 
 
 class GeminiNotAvailableError(Exception):
-    """Raised when Gemini API is not available."""
+    """Raised when Gemini API is not available (kept for backward compatibility)."""
     pass
 
 
@@ -69,54 +72,27 @@ class BoardAssignment:
         )
 
 
-def _get_default_model() -> str:
-    """Get default model from environment or fallback."""
-    return os.environ.get("CODENAMES_MODEL", os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview"))
-
-
-def _get_default_temperature() -> float:
-    """Get default temperature from environment or fallback."""
-    return float(os.environ.get("CODENAMES_TEMPERATURE", os.environ.get("GEMINI_TEMPERATURE", "0.7")))
-
-
-def _get_langchain_llm(model_name: str | None = None, temperature: float | None = None):
-    """Return ChatGoogleGenerativeAI.
+def _get_llm():
+    """Get the configured LLM backend. Default: local Qwen3 8B.
     
-    Args:
-        model_name: Model to use. Defaults to CODENAMES_MODEL or GEMINI_MODEL env var, 
-                    or gemini-3-flash-preview
-        temperature: Temperature for generation. Defaults to CODENAMES_TEMPERATURE or 
-                     GEMINI_TEMPERATURE env var, or 0.7
-    
-    Raises:
-        GeminiNotAvailableError: If API key is not set or langchain is not available
+    Supports two backends via WATCHDOG_LLM_BACKEND env var:
+      - "local"  (default): shared Qwen3 8B game-play model
+      - "gemini": Google Gemini via langchain-google-genai
     """
-    if model_name is None:
-        model_name = _get_default_model()
-    if temperature is None:
-        temperature = _get_default_temperature()
-    
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        raise GeminiNotAvailableError(
-            "GEMINI_API_KEY or GOOGLE_API_KEY environment variable must be set. "
-            "Get an API key at https://aistudio.google.com/apikey"
-        )
-    
-    try:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        return ChatGoogleGenerativeAI(
-            model=model_name,
-            temperature=temperature,
-            google_api_key=api_key,
-        )
-    except ImportError as e:
-        raise GeminiNotAvailableError(
-            "langchain-google-genai is not installed. "
-            "Install with: pip install langchain-google-genai langchain-core"
-        ) from e
-    except Exception as e:
-        raise GeminiNotAvailableError(f"Failed to initialize Gemini LLM: {e}") from e
+    backend = os.environ.get("WATCHDOG_LLM_BACKEND", "local").lower()
+    if backend == "gemini":
+        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+        if api_key:
+            from langchain_google_genai import ChatGoogleGenerativeAI
+            model = os.environ.get("CODENAMES_MODEL", os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"))
+            temperature = float(os.environ.get("CODENAMES_TEMPERATURE", "0.7"))
+            return ChatGoogleGenerativeAI(
+                model=model, temperature=temperature, google_api_key=api_key,
+            )
+        logger.warning("Gemini requested but no API key found. Falling back to local model.")
+    # Default: shared local game-play model
+    from watchdog_env.plugins.avalon.llm import get_game_play_model
+    return get_game_play_model()
 
 
 def _build_generation_prompt(complexity_level: int, board_size: int = 25) -> str:
@@ -279,7 +255,7 @@ def generate_board(
     model_name: str | None = None,
     temperature: float | None = None,
 ) -> BoardAssignment:
-    """Generate a complete Codenames board with assignments using Gemini.
+    """Generate a complete Codenames board with assignments.
     
     Args:
         seed: Random seed for reproducibility
@@ -288,14 +264,13 @@ def generate_board(
         blue_words: Number of blue team words
         neutral_words: Number of neutral words
         assassin_words: Number of assassin words
-        model_name: Gemini model to use (defaults to env var or gemini-3-flash-preview)
-        temperature: LLM temperature (defaults to env var or 0.7)
+        model_name: (deprecated, ignored) Model configured via WATCHDOG_LLM_BACKEND
+        temperature: (deprecated, ignored) Temperature configured via env vars
     
     Returns:
         BoardAssignment with words, team assignments, and semantic interactions
     
     Raises:
-        GeminiNotAvailableError: If Gemini API is not available
         BoardGenerationError: If board generation fails
     """
     if seed is not None:
@@ -303,14 +278,24 @@ def generate_board(
     
     board_size = red_words + blue_words + neutral_words + assassin_words
     
-    # Get LLM (raises if not available)
-    llm = _get_langchain_llm(model_name, temperature)
+    # Get LLM (local Qwen3 or Gemini based on WATCHDOG_LLM_BACKEND)
+    llm = _get_llm()
     
     prompt = _build_generation_prompt(complexity_level, board_size)
     
+    # Use dict messages — works with both local GamePlayModel and LangChain
+    system_content = (
+        "You are a word game designer creating boards for Codenames. "
+        "Generate creative word lists with interesting semantic relationships. "
+        "Respond only with the requested JSON format."
+    )
+    messages = [
+        {"role": "system", "content": system_content},
+        {"role": "user", "content": prompt},
+    ]
+    
     try:
-        from langchain_core.messages import HumanMessage
-        response = llm.invoke([HumanMessage(content=prompt)])
+        response = llm.invoke(messages)
         
         # Handle both string and list content (newer langchain versions return list for multimodal)
         content = response.content if hasattr(response, "content") else str(response)
@@ -323,9 +308,12 @@ def generate_board(
         else:
             response_text = str(content)
         
+        if not response_text.strip():
+            raise BoardGenerationError("LLM returned empty response for board generation")
+        
         interactions = _parse_llm_response(response_text, complexity_level)
         
-    except (GeminiNotAvailableError, BoardGenerationError):
+    except BoardGenerationError:
         raise
     except Exception as e:
         raise BoardGenerationError(f"LLM generation failed: {e}") from e
