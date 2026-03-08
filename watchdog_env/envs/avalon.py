@@ -189,19 +189,107 @@ def _load_dotenv() -> None:
 _load_dotenv()
 
 
+# ── Local HuggingFace model wrapper ─────────────────────────────────
+_local_hf_model = None
+_local_hf_tokenizer = None
+
+
+class _HFChatResponse:
+    """Minimal response object with .content to match LangChain interface."""
+    def __init__(self, content: str):
+        self.content = content
+
+
+class _HFChatModel:
+    """Lightweight wrapper that loads a HuggingFace model and exposes
+    an .invoke([SystemMessage, HumanMessage]) interface compatible with
+    LangChain ChatModels."""
+
+    def __init__(self, model_name: str, temperature: float = 0.8):
+        import torch
+        from transformers import AutoModelForCausalLM, AutoTokenizer
+
+        self.model_name = model_name
+        self.temperature = temperature
+
+        print(f"  [HF-Local] Loading {model_name}...")
+        self.tokenizer = AutoTokenizer.from_pretrained(model_name)
+        if self.tokenizer.pad_token is None:
+            self.tokenizer.pad_token = self.tokenizer.eos_token
+
+        self.model = AutoModelForCausalLM.from_pretrained(
+            model_name, torch_dtype=torch.bfloat16, device_map="auto",
+        )
+        self.model.eval()
+        print(f"  [HF-Local] {model_name} loaded on {self.model.device}")
+
+    def invoke(self, messages) -> _HFChatResponse:
+        """Generate a response from a list of message dicts or LangChain messages."""
+        import torch
+
+        # Convert LangChain messages to dicts
+        chat = []
+        for m in messages:
+            if hasattr(m, "content"):
+                role = getattr(m, "type", "user")
+                if role == "human":
+                    role = "user"
+                elif role == "system":
+                    role = "system"
+                else:
+                    role = "user"
+                chat.append({"role": role, "content": m.content})
+            else:
+                chat.append(m)
+
+        if hasattr(self.tokenizer, "apply_chat_template"):
+            prompt_text = self.tokenizer.apply_chat_template(
+                chat, tokenize=False, add_generation_prompt=True,
+            )
+        else:
+            prompt_text = "\n".join(
+                f"<|im_start|>{m['role']}\n{m['content']}<|im_end|>" for m in chat
+            )
+            prompt_text += "\n<|im_start|>assistant\n"
+
+        inputs = self.tokenizer(
+            prompt_text, return_tensors="pt", truncation=True, max_length=2048,
+        )
+        inputs = {k: v.to(self.model.device) for k, v in inputs.items()}
+
+        with torch.no_grad():
+            output_ids = self.model.generate(
+                **inputs,
+                max_new_tokens=256,
+                do_sample=self.temperature > 0,
+                temperature=self.temperature if self.temperature > 0 else None,
+                top_p=0.9 if self.temperature > 0 else None,
+            )
+
+        generated = output_ids[0][inputs["input_ids"].shape[1]:]
+        text = self.tokenizer.decode(generated, skip_special_tokens=True).strip()
+        return _HFChatResponse(text if text else "I have nothing to say.")
+
+
+def _get_local_hf_llm():
+    """Get or create a local HuggingFace model for text generation."""
+    global _local_hf_model
+    if _local_hf_model is not None:
+        return _local_hf_model
+
+    model_name = os.environ.get("LOCAL_MODEL_NAME", "Qwen/Qwen2.5-3B-Instruct")
+    temperature = float(os.environ.get("WATCHDOG_TEMPERATURE", "0.8"))
+    _local_hf_model = _HFChatModel(model_name, temperature)
+    return _local_hf_model
+
+
 def _get_llm():
     """Lazy-init a LangChain ChatModel for player response generation."""
     backend = os.environ.get("WATCHDOG_LLM_BACKEND", "gemini").lower()
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
     if backend == "local":
-        from langchain_openai import ChatOpenAI
-        return ChatOpenAI(
-            base_url=os.environ.get("LOCAL_MODEL_URL", "http://localhost:11434/v1"),
-            model=os.environ.get("LOCAL_MODEL_NAME", "qwen3-8b"),
-            temperature=float(os.environ.get("WATCHDOG_TEMPERATURE", "0.8")),
-            api_key=os.environ.get("LOCAL_API_KEY", "not-needed"),
-        )
+        return _get_local_hf_llm()
 
     # Default: Gemini via langchain-google-genai
     if not api_key:
