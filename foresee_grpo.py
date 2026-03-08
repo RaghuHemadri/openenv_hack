@@ -356,10 +356,11 @@ def _configure_backends(backend: str) -> None:
     from watchdog_env.envs import avalon as _avalon_mod
     _avalon_mod._llm_instance = None
 
-    # Only monkey-patch Avalon player responses with templates when
-    # backend is "template". For "gemini" / "local", let the real
-    # LangChain LLM generate player dialogue.
-    if backend != "template":
+    # Only let the real LangChain LLM generate Avalon player dialogue
+    # when backend is "gemini" (API available).  For "template" and
+    # "local" (which needs langchain_openai + a running server), fall
+    # through to the fast template monkey-patch below.
+    if backend == "gemini":
         return
 
     # --- Template fallback for player response generation (fast) ---
@@ -630,6 +631,8 @@ def _generate_avalon_episodes(
 
     for ep_idx in range(num_episodes):
         global_ep_idx = ep_offset + ep_idx
+        if (ep_idx + 1) % 10 == 0 or ep_idx == 0 or ep_idx == num_episodes - 1:
+            print(f"  [Avalon] Generating episode {ep_idx + 1}/{num_episodes}...")
         ep_diff = _episode_difficulty(ep_idx, num_episodes, difficulty, curriculum)
         config = LEVEL_CONFIG.get(ep_diff, LEVEL_CONFIG[2])
 
@@ -737,6 +740,8 @@ def _generate_cicero_episodes(
 
     for ep_idx in range(num_episodes):
         global_ep_idx = ep_offset + ep_idx
+        if (ep_idx + 1) % 10 == 0 or ep_idx == 0 or ep_idx == num_episodes - 1:
+            print(f"  [Cicero] Generating episode {ep_idx + 1}/{num_episodes}...")
         ep_diff = _episode_difficulty(ep_idx, num_episodes, difficulty, curriculum)
 
         power_a, power_b = random.sample(_CICERO_POWERS, 2)
@@ -1244,27 +1249,45 @@ def save_episodes(
     summaries: list[dict],
     output_path: str,
 ) -> None:
-    """Save generated episodes to JSON (prompts stored inline)."""
+    """Save generated episodes to JSON (appends to existing file if present)."""
     serializable = []
     for ex in examples:
         se = {k: v for k, v in ex.items() if k != "prompt"}
         se["prompt"] = ex["prompt"]  # full chat messages for reloading
         serializable.append(se)
 
+    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+
+    # Load existing data if file already exists and merge
+    existing_examples: list[dict] = []
+    existing_summaries: list[dict] = []
+    if os.path.exists(output_path):
+        try:
+            with open(output_path) as f:
+                prev = json.load(f)
+            existing_examples = prev.get("examples", [])
+            existing_summaries = prev.get("episode_summaries", [])
+            print(f"  Appending to existing {output_path} "
+                  f"({len(existing_examples)} existing + {len(serializable)} new)")
+        except (json.JSONDecodeError, KeyError):
+            pass  # corrupted file — overwrite
+
+    all_examples = existing_examples + serializable
+    all_summaries = existing_summaries + summaries
+
     data = {
         "generated_at": datetime.now().isoformat(),
-        "num_episodes": len(summaries),
-        "total_turns": len(examples),
-        "error_turns": sum(1 for ex in examples if ex["round_data"]["has_error"]),
-        "clean_turns": sum(1 for ex in examples if not ex["round_data"]["has_error"]),
-        "episode_summaries": summaries,
-        "examples": serializable,
+        "num_episodes": len(all_summaries),
+        "total_turns": len(all_examples),
+        "error_turns": sum(1 for ex in all_examples if ex["round_data"]["has_error"]),
+        "clean_turns": sum(1 for ex in all_examples if not ex["round_data"]["has_error"]),
+        "episode_summaries": all_summaries,
+        "examples": all_examples,
     }
 
-    Path(output_path).parent.mkdir(parents=True, exist_ok=True)
     with open(output_path, "w") as f:
         json.dump(data, f, indent=2, default=str)
-    print(f"  Saved {len(examples)} examples to {output_path}")
+    print(f"  Saved {len(all_examples)} total examples to {output_path}")
 
 
 def load_episodes(data_path: str) -> list[dict]:
