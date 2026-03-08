@@ -125,21 +125,17 @@ class TrainableMutationModel:
         self._initialized = True
 
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+        from transformers import AutoModelForCausalLM, AutoTokenizer
         from peft import LoraConfig, get_peft_model
 
-        logger.info("Loading trainable mutation model %s (4-bit + LoRA r=%d)...",
+        logger.info("Loading trainable mutation model %s (bf16 + LoRA r=%d)...",
                      self.model_name, self.lora_rank)
 
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_quant_type="nf4",
-        )
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
-            quantization_config=bnb_config,
+            torch_dtype=torch.bfloat16,
             device_map="auto",
+            attn_implementation="flash_attention_2",
         )
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
 

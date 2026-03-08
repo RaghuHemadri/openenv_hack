@@ -52,33 +52,28 @@ _local_model_instance = None
 class GamePlayModel:
     """Frozen local model for game play (Avalon / Cicero).
 
-    Loads Qwen/Qwen3-8B in 4-bit via bitsandbytes for low VRAM usage (~6GB).
+    Loads Qwen/Qwen3-8B in bf16 for fast inference on high-VRAM GPUs.
     Provides invoke() and invoke_batch() with the same interface as LangChain.
     """
 
     def __init__(self, model_name: str | None = None, temperature: float = 0.8):
         import torch
-        from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+        from transformers import AutoModelForCausalLM, AutoTokenizer
 
         self.model_name = model_name or os.environ.get("LOCAL_MODEL_NAME", "Qwen/Qwen3-8B")
         self.temperature = temperature
 
-        logger.info("Loading game-play model %s (4-bit)...", self.model_name)
+        logger.info("Loading game-play model %s (bf16 + flash_attention_2)...", self.model_name)
 
         self.tokenizer = AutoTokenizer.from_pretrained(self.model_name)
         if self.tokenizer.pad_token is None:
             self.tokenizer.pad_token = self.tokenizer.eos_token
 
-        bnb_config = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-            bnb_4bit_quant_type="nf4",
-        )
         self.model = AutoModelForCausalLM.from_pretrained(
             self.model_name,
-            quantization_config=bnb_config,
-            device_map="auto",
             torch_dtype=torch.bfloat16,
+            device_map="auto",
+            attn_implementation="flash_attention_2",
         )
         self.model.eval()
         logger.info("Game-play model loaded: %s", self.model_name)

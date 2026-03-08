@@ -371,19 +371,15 @@ def main():
         pass
 
     # ── Step 3: Load model with PEFT ───────────────────────────
-    print(f"\n[Step 3/6] Loading model: {args.model} (4-bit + LoRA r={args.lora_rank})...")
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    print(f"\n[Step 3/6] Loading model: {args.model} (bf16 + LoRA r={args.lora_rank})...")
+    from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import LoraConfig, get_peft_model
 
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=__import__("torch").bfloat16,
-        bnb_4bit_quant_type="nf4",
-    )
     model = AutoModelForCausalLM.from_pretrained(
         args.model,
-        quantization_config=bnb_config,
+        torch_dtype=__import__("torch").bfloat16,
         device_map="auto",
+        attn_implementation="flash_attention_2",
     )
     tokenizer = AutoTokenizer.from_pretrained(args.model)
 

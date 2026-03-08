@@ -55,19 +55,15 @@ MAX_TURNS = 5
 # ════════════════════════════════════════════════════════════════════
 
 def _load_model(model_name: str, lora_rank: int, adapter_path: str | None = None):
-    """Load a 4-bit quantized model with fresh or saved LoRA adapter."""
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    """Load a bf16 model with fresh or saved LoRA adapter."""
+    from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import LoraConfig, get_peft_model, PeftModel
 
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_quant_type="nf4",
-    )
     base_model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        quantization_config=bnb_config,
+        torch_dtype=torch.bfloat16,
         device_map="auto",
+        attn_implementation="flash_attention_2",
     )
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
@@ -95,23 +91,19 @@ def _load_dual_adapter_model(
     user_adapter_path: str | None = None,
     mutator_adapter_path: str | None = None,
 ):
-    """Load ONE 4-bit base model with two LoRA adapters (user + mutator).
+    """Load ONE bf16 base model with two LoRA adapters (user + mutator).
 
     Returns (model, tokenizer) with 'mutator' as active adapter.
     Use model.set_adapter('user') / model.set_adapter('mutator') to switch.
     """
-    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import LoraConfig, PeftModel
 
-    bnb_config = BitsAndBytesConfig(
-        load_in_4bit=True,
-        bnb_4bit_compute_dtype=torch.bfloat16,
-        bnb_4bit_quant_type="nf4",
-    )
     base_model = AutoModelForCausalLM.from_pretrained(
         model_name,
-        quantization_config=bnb_config,
+        torch_dtype=torch.bfloat16,
         device_map="auto",
+        attn_implementation="flash_attention_2",
     )
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
