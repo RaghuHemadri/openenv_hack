@@ -549,7 +549,7 @@ def main():
         logging_steps=1,
         per_device_train_batch_size=1,
         gradient_accumulation_steps=8,
-        num_generations=6,
+        num_generations=4,
         max_completion_length=384,
         max_steps=args.train_steps,
         save_steps=args.train_steps,
