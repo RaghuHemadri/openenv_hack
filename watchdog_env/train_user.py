@@ -34,6 +34,8 @@ from typing import Any
 # Episode Generation — directly use the environment (no HTTP server)
 # ════════════════════════════════════════════════════════════════════
 
+MAX_TURNS = 5
+
 OVERSEER_SYSTEM_PROMPT = """\
 You are an AI Oversight Agent (the "Watchdog"). You review conversations in \
 multi-agent games and detect mutations (errors injected by adversaries).
@@ -79,7 +81,7 @@ def generate_episodes(
         obs = env.reset(seed=seed)
         turns = []
 
-        while obs.phase != "done":
+        while obs.phase != "done" and len(turns) < MAX_TURNS:
             user_prompt = (
                 f"Game: {obs.task_domain} | Turn {obs.current_turn_number}/{obs.total_turns} "
                 f"| Difficulty: {obs.difficulty}\n\n"

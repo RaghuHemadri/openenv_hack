@@ -41,6 +41,8 @@ from watchdog_env.train_user import (
     reward_format,
 )
 
+MAX_TURNS = 5
+
 
 # ════════════════════════════════════════════════════════════════════
 # Model loading / unloading helpers (VRAM management)
@@ -134,7 +136,7 @@ def generate_episodes_for_adversarial(
         obs = env.reset(seed=ep_idx + seed_offset)
         turns = []
 
-        while obs.phase != "done":
+        while obs.phase != "done" and len(turns) < MAX_TURNS:
             user_prompt = (
                 f"Game: {obs.task_domain} | Turn {obs.current_turn_number}/{obs.total_turns} "
                 f"| Difficulty: {obs.difficulty}\n\n"
