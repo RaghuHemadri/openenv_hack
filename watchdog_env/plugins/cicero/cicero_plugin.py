@@ -13,10 +13,13 @@ from typing import Any
 
 from watchdog_env.plugins.base import (
     AgentTurn,
+    ContextMessage,
     MultiAgentConfig,
     MultiAgentState,
     MultiAgentStep,
     MultiAgentSystemPlugin,
+    append_to_context,
+    get_system_context,
 )
 from watchdog_env.plugins.cicero.cicero_config import CICERO_POWERS, CiceroConfig
 
@@ -42,6 +45,21 @@ def _get_langchain_llm():
 
 def _format_transcript(turns: list[AgentTurn]) -> str:
     return "\n".join(f"{t.agent_id}: {t.action_text}" for t in turns)
+
+
+def _context_to_langchain_messages(context: list[ContextMessage]) -> list:
+    """Convert system_context (ContextMessage list) to LangChain message objects."""
+    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+
+    out = []
+    for msg in context:
+        if msg.role == "system":
+            out.append(SystemMessage(content=msg.content))
+        elif msg.role == "user":
+            out.append(HumanMessage(content=msg.content))
+        elif msg.role == "assistant":
+            out.append(AIMessage(content=msg.content))
+    return out
 
 
 def _fallback_step(step_index: int, powers: list[str], done: bool) -> MultiAgentStep:
@@ -101,6 +119,7 @@ class CiceroPlugin(MultiAgentSystemPlugin):
             turns_so_far=[],
             config=cfg,
             done=False,
+            system_context=[],  # cleared on reset
         )
 
     def get_state(self) -> MultiAgentState:
@@ -138,10 +157,11 @@ class CiceroPlugin(MultiAgentSystemPlugin):
                     turns_so_far=list(self._state.turns_so_far),
                     config=self._state.config,
                     done=self._state.done,
+                    system_context=list(self._state.system_context),
                 ),
             )
 
-        # Use state history (turns_so_far) for context
+        # Use state history (turns_so_far) and system_context for each agent call
         transcript_so_far = _format_transcript(self._state.turns_so_far)
         regions = [
             "Vienna", "Warsaw", "Constantinople", "London", "Paris", "Berlin", "Rome",
@@ -178,11 +198,15 @@ class CiceroPlugin(MultiAgentSystemPlugin):
                     f"You are {power} opening the conversation with {other}. "
                     f"Send your first message (proposal, offer, or diplomatic overture). Output only your message."
                 )
+
+            # Build messages from system_context + current system + user; each agent call uses this context
+            context_msgs = get_system_context(self._state)
+            langchain_messages = _context_to_langchain_messages(context_msgs)
+            from langchain_core.messages import HumanMessage, SystemMessage
+            langchain_messages.extend([SystemMessage(content=system), HumanMessage(content=user)])
+
             try:
-                from langchain_core.messages import HumanMessage, SystemMessage
-                response = llm.invoke(
-                    [SystemMessage(content=system), HumanMessage(content=user)]
-                )
+                response = llm.invoke(langchain_messages)
                 text = response.content if hasattr(response, "content") else str(response)
                 if not (text and isinstance(text, str)):
                     text = "I propose we coordinate our moves this season. Shall we support each other in the region?"
@@ -190,6 +214,9 @@ class CiceroPlugin(MultiAgentSystemPlugin):
             except Exception as e:
                 logger.warning("LLM call failed: %s", e)
                 text = "We should support each other in this region. What say you?"
+
+            append_to_context(self._state, "user", user)
+            append_to_context(self._state, "assistant", text)
             turns.append(AgentTurn(agent_id=power, action_text=text, step_index=step_index))
             transcript_so_far = _format_transcript(self._state.turns_so_far + turns)
 
@@ -207,5 +234,6 @@ class CiceroPlugin(MultiAgentSystemPlugin):
                 turns_so_far=list(self._state.turns_so_far),
                 config=self._state.config,
                 done=self._state.done,
+                system_context=list(self._state.system_context),
             ),
         )

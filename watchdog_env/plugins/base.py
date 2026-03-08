@@ -8,7 +8,18 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any
+from typing import Any, Literal
+
+
+ContextRole = Literal["system", "user", "assistant"]
+
+
+@dataclass
+class ContextMessage:
+    """A single message in the system context (LLM conversation history)."""
+
+    role: ContextRole
+    content: str
 
 
 @dataclass
@@ -38,6 +49,26 @@ class MultiAgentState:
     config: MultiAgentConfig | None = None
     done: bool = False
     metadata: dict[str, Any] = field(default_factory=dict)
+    system_context: list[ContextMessage] = field(default_factory=list)
+
+
+def get_system_context(state: MultiAgentState) -> list[ContextMessage]:
+    """Return the full system context (LLM message history) for this run."""
+    return state.system_context
+
+
+def append_to_context(
+    state: MultiAgentState,
+    role: ContextRole,
+    content: str,
+) -> None:
+    """Append a message to the system context. Used by each agent call."""
+    state.system_context.append(ContextMessage(role=role, content=content))
+
+
+def clear_system_context(state: MultiAgentState) -> None:
+    """Clear the system context. Called from reset."""
+    state.system_context.clear()
 
 
 @dataclass
@@ -67,7 +98,7 @@ class MultiAgentSystemPlugin(ABC):
         seed: int | None = None,
         config: MultiAgentConfig | None = None,
     ) -> None:
-        """Start or restart the scenario with this seed and config. Clear state if stateful."""
+        """Start or restart the scenario with this seed and config. Clear state and system_context."""
         ...
 
     @abstractmethod

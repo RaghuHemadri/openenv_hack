@@ -2,10 +2,14 @@
 
 from watchdog_env.plugins.base import (
     AgentTurn,
+    ContextMessage,
     MultiAgentConfig,
     MultiAgentState,
     MultiAgentStep,
     MultiAgentSystemPlugin,
+    append_to_context,
+    clear_system_context,
+    get_system_context,
 )
 from watchdog_env.plugins.registry import get_plugin, get_registry, list_game_ids, register
 
@@ -18,11 +22,15 @@ except Exception:  # optional: Cicero may depend on langchain-google-genai
 
 __all__ = [
     "AgentTurn",
+    "ContextMessage",
     "MultiAgentConfig",
     "MultiAgentState",
     "MultiAgentStep",
     "MultiAgentSystemPlugin",
+    "append_to_context",
+    "clear_system_context",
     "get_plugin",
+    "get_system_context",
     "get_registry",
     "list_game_ids",
     "register",

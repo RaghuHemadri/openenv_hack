@@ -6,6 +6,7 @@ import os
 
 import pytest
 
+from watchdog_env.plugins.base import get_system_context
 from watchdog_env.plugins.cicero import CiceroConfig, CiceroPlugin
 from watchdog_env.plugins.registry import get_plugin
 
@@ -50,6 +51,7 @@ def test_reset_and_get_state(plugin):
     assert len(state.turns_so_far) == 0
     assert state.done is False
     assert state.config is not None
+    assert len(state.system_context) == 0  # system_context cleared on reset
 
 
 def test_generate_step_based_on_state_history(plugin):
@@ -67,6 +69,17 @@ def test_generate_step_based_on_state_history(plugin):
     assert state_after_0.step_index == 1
     assert len(state_after_0.turns_so_far) == len(step0.turns)
 
+    # Context: step.state has system_context; with LLM it accumulates, with fallback it stays empty
+    assert step0.state is not None
+    assert hasattr(step0.state, "system_context")
+    assert isinstance(step0.state.system_context, list)
+    ctx_after_0 = get_system_context(state_after_0)
+    if len(ctx_after_0) > 0:  # LLM path: context accumulates
+        assert len(ctx_after_0) == 2 * len(step0.turns)  # user+assistant per turn
+        for msg in ctx_after_0:
+            assert msg.role in ("user", "assistant")
+            assert msg.content
+
     step1 = plugin.generate_step(seed=123, step_index=1)
     print(f"\n[generate_step 1] step_index={step1.step_index}, done={step1.done}, turns={[(t.agent_id, t.action_text[:50]+'...' if len(t.action_text)>50 else t.action_text) for t in step1.turns]}")
     assert step1.step_index == 1
@@ -76,6 +89,12 @@ def test_generate_step_based_on_state_history(plugin):
     print(f"\n[get_state after step 1] step_index={state_after_1.step_index}, turns_so_far count={len(state_after_1.turns_so_far)}, done={state_after_1.done}")
     assert state_after_1.done is True
 
+    # With LLM: context grows across steps
+    ctx_after_1 = get_system_context(state_after_1)
+    if len(ctx_after_0) > 0:
+        assert len(ctx_after_1) > len(ctx_after_0)
+        assert len(ctx_after_1) == len(ctx_after_0) + 2 * len(step1.turns)
+
 
 def test_cicero_registered():
     """Cicero plugin is registered so get_plugin('cicero') returns it."""
@@ -83,3 +102,24 @@ def test_cicero_registered():
     print(f"\n[get_plugin('cicero')] {type(p).__name__} (game_id={p.get_game_id() if p else None})")
     assert p is not None
     assert p.get_game_id() == "cicero"
+
+
+def test_cicero_context_in_step_state(plugin):
+    """Each step returns state with system_context; context has user/assistant alternation."""
+    plugin.reset(seed=1, config=CiceroConfig(num_steps=1))
+    step = plugin.generate_step(seed=1, step_index=0)
+    assert step.state is not None
+    assert isinstance(step.state.system_context, list)
+    ctx = step.state.system_context
+    # With LLM: user, assistant per agent; alternation
+    for i, msg in enumerate(ctx):
+        assert msg.role in ("user", "assistant")
+        assert isinstance(msg.content, str) and len(msg.content) > 0
+
+
+def test_cicero_context_cleared_on_reset(plugin):
+    """Reset clears system_context (empty after reset regardless of LLM vs fallback)."""
+    plugin.reset(seed=1, config=CiceroConfig(num_steps=2))
+    plugin.generate_step(seed=1, step_index=0)
+    plugin.reset(seed=99, config=CiceroConfig(num_steps=2))
+    assert len(get_system_context(plugin.get_state())) == 0
