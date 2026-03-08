@@ -28,6 +28,11 @@ import sys
 from pathlib import Path
 from typing import Any
 
+# Force local model — never use Gemini during training
+os.environ["WATCHDOG_LLM_BACKEND"] = "local"
+os.environ.pop("GEMINI_API_KEY", None)
+os.environ.pop("GOOGLE_API_KEY", None)
+
 
 # ════════════════════════════════════════════════════════════════════
 # Episode Generation — directly use the environment (no HTTP server)
