@@ -61,6 +61,7 @@ sys.path.insert(0, os.path.join(_here, "watchdog_env"))
 # needs the Avalon game engine, error engine, and rewards, none of which
 # require the openenv server/client framework at runtime.
 import types as _types
+from pydantic import BaseModel as _PydanticBase
 
 
 class _SubscriptableMeta(type):
@@ -73,6 +74,18 @@ class _SubscriptableBase(metaclass=_SubscriptableMeta):
     pass
 
 
+# Pydantic-compatible base for Action/Observation/State so that
+# MultiTurnAction(...) etc. work with keyword args as Pydantic models.
+class _PydanticSubscriptableMeta(_PydanticBase.__class__):
+    def __getitem__(cls, params):
+        return cls
+
+
+class _PydanticSubscriptableBase(_PydanticBase, metaclass=_PydanticSubscriptableMeta):
+    class Config:
+        arbitrary_types_allowed = True
+
+
 for _mod_name in (
     "openenv", "openenv.core", "openenv.core.env_server",
     "openenv.core.env_server.types", "openenv.core.env_server.interfaces",
@@ -81,10 +94,14 @@ for _mod_name in (
     if _mod_name not in sys.modules:
         _stub = _types.ModuleType(_mod_name)
         _stub.__path__ = []  # type: ignore[attr-defined]
-        # Base classes that may be subscripted as generics
+        # Pydantic-based stubs for types that get subclassed with Field()
+        for _cls_name in ("Action", "Observation", "State"):
+            setattr(_stub, _cls_name, type(
+                _cls_name, (_PydanticSubscriptableBase,), {}
+            ))
+        # Plain stubs for framework classes only used as base/generic
         for _cls_name in (
-            "Action", "Observation", "State", "Environment",
-            "EnvironmentMetadata", "EnvClient", "StepResult",
+            "Environment", "EnvironmentMetadata", "EnvClient", "StepResult",
         ):
             setattr(_stub, _cls_name, type(_cls_name, (_SubscriptableBase,), {}))
         sys.modules[_mod_name] = _stub
