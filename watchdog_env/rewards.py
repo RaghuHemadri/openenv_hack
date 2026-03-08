@@ -80,7 +80,7 @@ def compute_pass_reward(round_data: dict) -> tuple[float, str]:
         return 0.1, "PASS on clean turn. +0.1"
     else:
         # Passed an error turn — no immediate penalty (penalized at episode end)
-        return 0.0, ""
+        return 0.0, "PASS on error turn. +0.0"
 
 
 def compute_intervene_reward(round_data: dict) -> tuple[float, str, str]:

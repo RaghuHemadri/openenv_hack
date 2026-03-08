@@ -169,7 +169,21 @@ class CiceroPlugin(MultiAgentSystemPlugin):
                 speaker_display=power,
                 message=text,
             )
-            turns.append(AgentTurn(agent_id=power, action_text=text, step_index=step_index, display_name=power))
+            turns.append(
+                AgentTurn(
+                    agent_id=power,
+                    action_text=text,
+                    step_index=step_index,
+                    display_name=power,
+                    metadata={
+                        "season": season,
+                        "region": region,
+                        "domain_name": domain_name,
+                        "domain_desc": domain_desc,
+                        "counterpart": other,
+                    },
+                )
+            )
             transcript_so_far = _format_conversation_log(get_conversation_log(self._state))
 
         self._state.step_index = step_index + 1

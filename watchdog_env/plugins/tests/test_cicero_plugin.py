@@ -100,6 +100,19 @@ def test_cicero_context_in_step_state(plugin):
         assert isinstance(entry["message"], str) and len(entry["message"]) > 0
 
 
+def test_cicero_turns_have_rich_metadata(plugin):
+    """Each AgentTurn has rich metadata (season, region, domain_name, domain_desc, counterpart)."""
+    plugin.reset(seed=1, config=CiceroConfig(num_steps=5))
+    step = plugin.generate_step(seed=1, step_index=0)
+    for t in step.turns:
+        assert "season" in t.metadata
+        assert "region" in t.metadata
+        assert "domain_name" in t.metadata
+        assert "domain_desc" in t.metadata
+        assert "counterpart" in t.metadata
+        assert t.metadata["counterpart"] in plugin.list_agent_ids()
+
+
 def test_cicero_context_cleared_on_reset(plugin):
     """Reset clears conversation_log (empty after reset regardless of LLM vs fallback)."""
     plugin.reset(seed=1, config=CiceroConfig(num_steps=5))

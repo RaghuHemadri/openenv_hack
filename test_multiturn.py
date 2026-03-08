@@ -19,6 +19,7 @@ Tests:
   12. Flag with error_type
   13. Cicero full episode via env
   14. Env metadata
+  15. Cicero with mutations enabled
 
 Run:
     cd watchdog_env && python ../test_multiturn.py
@@ -465,6 +466,44 @@ def test_env_metadata():
     print("  ✓ Test 14 PASSED")
 
 
+# ─── Test 15: Cicero with Mutations Enabled ─────────────────────────────
+
+def test_cicero_with_mutations():
+    """Cicero with use_mutations=True: mutations can occur, at least one per episode."""
+    header("Test 15: Cicero with Mutations Enabled")
+
+    try:
+        from watchdog_env.plugins import get_plugin
+        assert get_plugin("cicero") is not None
+    except (ImportError, AssertionError):
+        print("  Skipped: Cicero plugin not available")
+        return
+
+    env = WatchDogMultiTurnEnvironment(game_id="cicero", use_mutations=True, use_llm=True)
+    obs = env.reset(seed=1)
+    show_obs(obs, "RESET")
+    assert obs.task_domain == "cicero", f"Expected task_domain=cicero, got {obs.task_domain}"
+
+    step = 0
+    while not obs.done:
+        step += 1
+        action = MultiTurnAction(action_type="pass")
+        obs = env.step(action)
+        show_obs(obs, f"Step {step}")
+
+        if step > 15:
+            print("  WARN: Exceeded 15 steps, stopping")
+            break
+
+    show_ground_truth(env)
+    num_errors = sum(1 for t in env._turns_seen if t.get("has_error"))
+    print(f"\n  Summary: {len(env._turns_seen)} turns, mutations: {num_errors}")
+    assert num_errors >= 1, (
+        "Cicero with mutations enabled should guarantee at least one mutation per episode"
+    )
+    print("  ✓ Test 15 PASSED")
+
+
 # ─── Main ───────────────────────────────────────────────────────────
 
 def main():
@@ -492,6 +531,7 @@ def main():
         ("Flag with error_type", test_flag_with_error_type),
         ("Cicero Full Episode", test_cicero_full_episode),
         ("Env Metadata", test_env_metadata),
+        ("Cicero with Mutations", test_cicero_with_mutations),
     ]
 
     passed = 0
