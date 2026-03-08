@@ -2,6 +2,8 @@
 
 **AI oversight training using [OpenEnv](https://github.com/meta-pytorch/OpenEnv) and multi-agent game plugins.**
 
+## Presentation: [Link](https://docs.google.com/presentation/d/1zuvMWCRBVgK51ro7KKlH0Fu9q_Y4L84IlWYFl0KAMOw/edit?usp=sharing)
+
 This repository contains the **WatchDog** RL environment for training AI agents to detect errors, lies, and misdirection in multi-agent conversations. Built for the OpenEnv hackathon.
 
 ## What's Inside
