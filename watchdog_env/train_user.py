@@ -330,7 +330,7 @@ def reward_format(completions, **kwargs):
 # Evaluation
 # ════════════════════════════════════════════════════════════════════
 
-def evaluate_model(model, tokenizer, eval_samples: list[dict], label: str = "eval", batch_size: int = 8) -> dict:
+def evaluate_model(model, tokenizer, eval_samples: list[dict], label: str = "eval", batch_size: int = 4) -> dict:
     """Evaluate model on held-out samples with batched inference."""
     import torch
     model.eval()
@@ -338,9 +338,10 @@ def evaluate_model(model, tokenizer, eval_samples: list[dict], label: str = "eva
     results = {"tp": 0, "fp": 0, "tn": 0, "fn": 0, "correct": 0, "total": 0}
     action_counts = {"PASS": 0, "FLAG": 0, "QUESTION": 0, "UNKNOWN": 0}
     predictions = []
+    num_batches = (len(eval_samples) + batch_size - 1) // batch_size
 
     # Process in batches for better GPU utilization
-    for batch_start in range(0, len(eval_samples), batch_size):
+    for batch_idx, batch_start in enumerate(range(0, len(eval_samples), batch_size)):
         batch = eval_samples[batch_start:batch_start + batch_size]
 
         prompt_texts = [
@@ -357,7 +358,7 @@ def evaluate_model(model, tokenizer, eval_samples: list[dict], label: str = "eva
 
         with torch.no_grad():
             output_ids = model.generate(
-                **inputs, max_new_tokens=384, temperature=0.1, do_sample=True,
+                **inputs, max_new_tokens=192, do_sample=False,
             )
 
         for i, sample in enumerate(batch):
@@ -386,6 +387,9 @@ def evaluate_model(model, tokenizer, eval_samples: list[dict], label: str = "eva
                 results["fn"] += 1
 
             predictions.append({"gt": gt_action, "pred": pred_action, "response": response[:200]})
+
+        if (batch_idx + 1) % 5 == 0 or batch_idx == num_batches - 1:
+            print(f"    Eval batch {batch_idx + 1}/{num_batches} done ({results['total']}/{len(eval_samples)} samples)")
 
     # Compute metrics
     total = results["total"] or 1
