@@ -13,6 +13,10 @@ Usage:
   python generate_case_study.py --adapter_path watchdog_env/outputs/user_adapter \
                                  --model Qwen/Qwen3-8B
 
+  # Scan ALL episodes to find the best one for the demo:
+  python generate_case_study.py --scan \
+      --adapter_path watchdog_env/outputs/user_adapter --model Qwen/Qwen3-8B
+
   # Pick a specific episode:
   python generate_case_study.py --episode_id 4
 """
@@ -108,8 +112,8 @@ def score_episode(episode: dict, predictions: list[dict]) -> dict:
 
 # ─── Model inference ───────────────────────────────────────────────
 
-def run_inference_live(episode: dict, adapter_path: str, model_name: str) -> list[dict]:
-    """Run each turn through the trained model with the LoRA adapter."""
+def load_model(adapter_path: str, model_name: str):
+    """Load base model + LoRA adapter once. Returns (model, tokenizer)."""
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from peft import PeftModel
@@ -126,6 +130,12 @@ def run_inference_live(episode: dict, adapter_path: str, model_name: str) -> lis
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
+    return model, tokenizer
+
+
+def _run_episode_with_model(episode: dict, model, tokenizer, verbose: bool = True) -> list[dict]:
+    """Run a single episode through an already-loaded model."""
+    import torch
 
     predictions = []
     for turn in episode["turns"]:
@@ -144,9 +154,17 @@ def run_inference_live(episode: dict, adapter_path: str, model_name: str) -> lis
         parsed = parse_action(response)
         parsed["raw_response"] = response
         predictions.append(parsed)
-        print(f"  Turn {turn['turn_number']:2d}: pred={parsed['action']:<8s}  gt={turn['ground_truth']}")
+        if verbose:
+            print(f"  Turn {turn['turn_number']:2d}: pred={parsed['action']:<8s}  gt={turn['ground_truth']}")
+    return predictions
 
-    del model, base_model
+
+def run_inference_live(episode: dict, adapter_path: str, model_name: str) -> list[dict]:
+    """Run each turn through the trained model with the LoRA adapter."""
+    model, tokenizer = load_model(adapter_path, model_name)
+    predictions = _run_episode_with_model(episode, model, tokenizer)
+    import torch
+    del model
     torch.cuda.empty_cache()
     return predictions
 
@@ -197,6 +215,55 @@ def run_inference_offline(episode: dict) -> list[dict]:
         })
         print(f"  Turn {turn['turn_number']:2d}: pred={gt:<8s}  gt={gt}  (offline)")
     return predictions
+
+
+# ─── Scan all episodes ──────────────────────────────────────────────
+
+def scan_all_episodes(episodes: list[dict], adapter_path: str, model_name: str):
+    """Run every episode through the model, rank by quality, return results."""
+    model, tokenizer = load_model(adapter_path, model_name)
+
+    results = []  # (episode, predictions, scores)
+    for ep in episodes:
+        ep_id = ep["episode_id"]
+        flags = sum(1 for t in ep["turns"] if t["has_error"])
+        print(f"\n── Episode {ep_id} ({ep['num_turns']} turns, {flags} mutation(s)) ──")
+        preds = _run_episode_with_model(ep, model, tokenizer, verbose=True)
+        sc = score_episode(ep, preds)
+        results.append((ep, preds, sc))
+        print(f"   → accuracy={sc['accuracy']:.0%}  TP={sc['tp']} TN={sc['tn']} FP={sc['fp']} FN={sc['fn']}")
+
+    import torch
+    del model
+    torch.cuda.empty_cache()
+
+    # Print summary table
+    print("\n" + "=" * 72)
+    print(f"  {'Ep':>3s}  {'Turns':>5s}  {'Errs':>4s}  {'Acc':>5s}  {'TP':>3s}  {'TN':>3s}  {'FP':>3s}  {'FN':>3s}  Grade")
+    print("-" * 72)
+    for ep, preds, sc in results:
+        has_mut = sum(1 for t in ep["turns"] if t["has_error"])
+        # Grade: perfect > good > ok > bad
+        if sc["accuracy"] == 1.0 and has_mut > 0:
+            grade = "PERFECT"
+        elif sc["fn"] == 0 and sc["fp"] == 0:
+            grade = "CLEAN"
+        elif sc["fn"] == 0 and has_mut > 0:
+            grade = "GOOD (caught all)"
+        elif sc["accuracy"] >= 0.8:
+            grade = "OK"
+        else:
+            grade = "---"
+        print(f"  {ep['episode_id']:3d}  {ep['num_turns']:5d}  {has_mut:4d}  "
+              f"{sc['accuracy']:5.0%}  {sc['tp']:3d}  {sc['tn']:3d}  {sc['fp']:3d}  {sc['fn']:3d}  {grade}")
+    print("=" * 72)
+
+    # Pick best: prioritize episodes WITH mutations, then by accuracy, then fewer FPs
+    with_mutations = [(ep, pr, sc) for ep, pr, sc in results
+                      if sum(1 for t in ep["turns"] if t["has_error"]) > 0]
+    pool = with_mutations if with_mutations else results
+    best = max(pool, key=lambda x: (x[2]["accuracy"], -x[2]["fp"], x[2]["tp"]))
+    return best, results
 
 
 # ─── Episode selection ──────────────────────────────────────────────
@@ -391,6 +458,8 @@ def main():
     parser.add_argument("--adapter_path", default=None, help="Path to LoRA adapter (enables live inference)")
     parser.add_argument("--model", default="Qwen/Qwen3-8B", help="Base model name for live inference")
     parser.add_argument("--output_dir", default=str(OUTPUT_DIR), help="Output directory")
+    parser.add_argument("--scan", action="store_true",
+                        help="Scan ALL episodes with live inference, rank them, and pick the best")
     args = parser.parse_args()
 
     print("=" * 60)
@@ -402,27 +471,56 @@ def main():
         episodes = json.load(f)
     print(f"\nLoaded {len(episodes)} eval episodes from {args.eval_path}")
 
-    # Pick episode
-    episode, ep_id = pick_best_episode(episodes, args.episode_id)
-    error_turns = [t for t in episode["turns"] if t["has_error"]]
-    print(f"Selected episode {ep_id}: {episode['num_turns']} turns, "
-          f"{len(error_turns)} mutation(s)")
-
-    # Run inference
-    if args.adapter_path and Path(args.adapter_path).exists():
-        print(f"\nRunning live inference with adapter: {args.adapter_path}")
+    # ── Scan mode: evaluate all episodes, pick the best ──
+    if args.scan:
+        if not args.adapter_path or not Path(args.adapter_path).exists():
+            print("ERROR: --scan requires a valid --adapter_path for live inference")
+            return
+        (episode, predictions, scores), all_results = scan_all_episodes(
+            episodes, args.adapter_path, args.model,
+        )
+        ep_id = episode["episode_id"]
         mode = "live (LoRA adapter)"
-        predictions = run_inference_live(episode, args.adapter_path, args.model)
-    else:
-        if args.adapter_path:
-            print(f"\nAdapter not found at {args.adapter_path} — falling back to offline mode")
-        else:
-            print("\nNo adapter specified — using offline mode (ground truth as predictions)")
-        mode = "offline (ground truth)"
-        predictions = run_inference_offline(episode)
+        error_turns = [t for t in episode["turns"] if t["has_error"]]
+        print(f"\n★ Best episode for demo: {ep_id} — "
+              f"{scores['accuracy']:.0%} accuracy, {len(error_turns)} mutation(s), "
+              f"TP={scores['tp']} FP={scores['fp']} FN={scores['fn']}")
 
-    # Score
-    scores = score_episode(episode, predictions)
+        # Save the full scan results
+        out_dir = Path(args.output_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        scan_path = out_dir / "scan_results.json"
+        scan_data = []
+        for ep, preds, sc in all_results:
+            scan_data.append({
+                "episode_id": ep["episode_id"],
+                "num_turns": ep["num_turns"],
+                "num_mutations": sum(1 for t in ep["turns"] if t["has_error"]),
+                **sc,
+            })
+        scan_path.write_text(json.dumps(scan_data, indent=2), encoding="utf-8")
+        print(f"Scan results saved to: {scan_path}")
+    else:
+        # ── Single episode mode ──
+        episode, ep_id = pick_best_episode(episodes, args.episode_id)
+        error_turns = [t for t in episode["turns"] if t["has_error"]]
+        print(f"Selected episode {ep_id}: {episode['num_turns']} turns, "
+              f"{len(error_turns)} mutation(s)")
+
+        if args.adapter_path and Path(args.adapter_path).exists():
+            print(f"\nRunning live inference with adapter: {args.adapter_path}")
+            mode = "live (LoRA adapter)"
+            predictions = run_inference_live(episode, args.adapter_path, args.model)
+        else:
+            if args.adapter_path:
+                print(f"\nAdapter not found at {args.adapter_path} — falling back to offline mode")
+            else:
+                print("\nNo adapter specified — using offline mode (ground truth as predictions)")
+            mode = "offline (ground truth)"
+            predictions = run_inference_offline(episode)
+
+        scores = score_episode(episode, predictions)
+
     print(f"\nEpisode accuracy: {scores['accuracy']:.0%} "
           f"(TP={scores['tp']}, TN={scores['tn']}, FP={scores['fp']}, FN={scores['fn']})")
 
