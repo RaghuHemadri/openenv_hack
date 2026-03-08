@@ -27,6 +27,13 @@ try:
 except Exception:  # optional: Codenames may depend on langchain-google-genai
     CodenamesPlugin = None  # type: ignore[misc, assignment]
 
+# Auto-register Avalon so game_id="avalon" is available
+try:
+    from watchdog_env.plugins.avalon import AvalonPlugin
+    register(AvalonPlugin())
+except Exception:
+    AvalonPlugin = None  # type: ignore[misc, assignment]
+
 __all__ = [
     "AgentTurn",
     "ConversationLogEntry",
@@ -43,4 +50,5 @@ __all__ = [
     "register",
     "CiceroPlugin",
     "CodenamesPlugin",
+    "AvalonPlugin",
 ]
