@@ -9,3 +9,4 @@ build/
 .env
 watchdog_grpo_output/
 case_study
+output*
