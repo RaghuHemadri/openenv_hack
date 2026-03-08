@@ -6,70 +6,41 @@ Implements all MultiAgentSystemPlugin methods. generate_step is based on state h
 
 from __future__ import annotations
 
-import logging
 import os
 import random
 from typing import Any
 
+from watchdog_env.models import AgentTurn, MultiAgentConfig, MultiAgentState, MultiAgentStep
 from watchdog_env.plugins.base import (
-    AgentTurn,
-    ContextMessage,
-    MultiAgentConfig,
-    MultiAgentState,
-    MultiAgentStep,
     MultiAgentSystemPlugin,
-    append_to_context,
-    get_system_context,
+    append_to_conversation_log,
+    get_conversation_log,
 )
 from watchdog_env.plugins.cicero.cicero_config import CICERO_POWERS, CiceroConfig
 
-logger = logging.getLogger(__name__)
-
 
 def _get_langchain_llm():
-    """Return ChatGoogleGenerativeAI if API key and langchain available, else None."""
+    """Return ChatGoogleGenerativeAI. Raises if API key missing or langchain unavailable."""
     api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
     if not api_key:
-        return None
-    try:
-        from langchain_google_genai import ChatGoogleGenerativeAI
-        return ChatGoogleGenerativeAI(
-            model="gemini-2.0-flash",
-            temperature=0.85,
-            google_api_key=api_key,
+        raise RuntimeError(
+            "Cicero plugin requires GEMINI_API_KEY or GOOGLE_API_KEY. No template fallback."
         )
-    except Exception as e:
-        logger.warning("LangChain Google GenAI not available: %s", e)
-        return None
-
-
-def _format_transcript(turns: list[AgentTurn]) -> str:
-    return "\n".join(f"{t.agent_id}: {t.action_text}" for t in turns)
-
-
-def _context_to_langchain_messages(context: list[ContextMessage]) -> list:
-    """Convert system_context (ContextMessage list) to LangChain message objects."""
-    from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
-
-    out = []
-    for msg in context:
-        if msg.role == "system":
-            out.append(SystemMessage(content=msg.content))
-        elif msg.role == "user":
-            out.append(HumanMessage(content=msg.content))
-        elif msg.role == "assistant":
-            out.append(AIMessage(content=msg.content))
-    return out
-
-
-def _fallback_step(step_index: int, powers: list[str], done: bool) -> MultiAgentStep:
-    """Deterministic fallback when Gemini is unavailable."""
-    turn = AgentTurn(
-        agent_id=powers[step_index % len(powers)],
-        action_text="We should coordinate our moves this season. I propose we support each other.",
-        step_index=step_index,
+    from langchain_google_genai import ChatGoogleGenerativeAI
+    model = os.environ.get("GEMINI_MODEL", "gemini-2.5-flash")
+    return ChatGoogleGenerativeAI(
+        model=model,
+        temperature=0.85,
+        google_api_key=api_key,
     )
-    return MultiAgentStep(turns=[turn], done=done, step_index=step_index)
+
+
+def _format_conversation_log(entries: list[dict]) -> str:
+    """Format conversation_log entries as transcript for LLM context."""
+    return "\n".join(
+        f"{e.get('speaker_display', e.get('speaker_id', '?'))}: {e.get('message', '')}"
+        for e in entries
+    )
 
 
 # Diplomacy game context (from diplomacy_cicero: 1914 Europe, seven powers, Supply Centers)
@@ -119,7 +90,7 @@ class CiceroPlugin(MultiAgentSystemPlugin):
             turns_so_far=[],
             config=cfg,
             done=False,
-            system_context=[],  # cleared on reset
+            conversation_log=[],
         )
 
     def get_state(self) -> MultiAgentState:
@@ -137,32 +108,14 @@ class CiceroPlugin(MultiAgentSystemPlugin):
         else:
             num_steps = 3
             powers = list(CICERO_POWERS)
-            model_name = "gemini-2.0-flash"
+            model_name = "gemini-2.5-flash"
             temperature = 0.85
 
         done = step_index >= num_steps - 1
         llm = _get_langchain_llm()
-        if llm is None:
-            step = _fallback_step(step_index, powers, done)
-            self._state.step_index = step_index + 1
-            self._state.turns_so_far.extend(step.turns)
-            self._state.done = done
-            return MultiAgentStep(
-                turns=step.turns,
-                done=done,
-                step_index=step_index,
-                game_id=self.get_game_id(),
-                state=MultiAgentState(
-                    step_index=self._state.step_index,
-                    turns_so_far=list(self._state.turns_so_far),
-                    config=self._state.config,
-                    done=self._state.done,
-                    system_context=list(self._state.system_context),
-                ),
-            )
 
-        # Use state history (turns_so_far) and system_context for each agent call
-        transcript_so_far = _format_transcript(self._state.turns_so_far)
+        # Use conversation_log for context
+        transcript_so_far = _format_conversation_log(get_conversation_log(self._state))
         regions = [
             "Vienna", "Warsaw", "Constantinople", "London", "Paris", "Berlin", "Rome",
             "Serbia", "Bulgaria", "Galicia", "Ukraine", "North Sea", "Mediterranean",
@@ -199,26 +152,25 @@ class CiceroPlugin(MultiAgentSystemPlugin):
                     f"Send your first message (proposal, offer, or diplomatic overture). Output only your message."
                 )
 
-            # Build messages from system_context + current system + user; each agent call uses this context
-            context_msgs = get_system_context(self._state)
-            langchain_messages = _context_to_langchain_messages(context_msgs)
             from langchain_core.messages import HumanMessage, SystemMessage
-            langchain_messages.extend([SystemMessage(content=system), HumanMessage(content=user)])
+            langchain_messages = [SystemMessage(content=system), HumanMessage(content=user)]
 
-            try:
-                response = llm.invoke(langchain_messages)
-                text = response.content if hasattr(response, "content") else str(response)
-                if not (text and isinstance(text, str)):
-                    text = "I propose we coordinate our moves this season. Shall we support each other in the region?"
-                text = text.strip()
-            except Exception as e:
-                logger.warning("LLM call failed: %s", e)
-                text = "We should support each other in this region. What say you?"
+            response = llm.invoke(langchain_messages)
+            text = response.content if hasattr(response, "content") else str(response)
+            if not (text and isinstance(text, str)):
+                raise RuntimeError(
+                    f"Cicero plugin: LLM returned empty response for {power}. No fallback."
+                )
+            text = text.strip()
 
-            append_to_context(self._state, "user", user)
-            append_to_context(self._state, "assistant", text)
-            turns.append(AgentTurn(agent_id=power, action_text=text, step_index=step_index))
-            transcript_so_far = _format_transcript(self._state.turns_so_far + turns)
+            append_to_conversation_log(
+                self._state,
+                speaker_id=power,
+                speaker_display=power,
+                message=text,
+            )
+            turns.append(AgentTurn(agent_id=power, action_text=text, step_index=step_index, display_name=power))
+            transcript_so_far = _format_conversation_log(get_conversation_log(self._state))
 
         self._state.step_index = step_index + 1
         self._state.turns_so_far.extend(turns)
@@ -234,6 +186,6 @@ class CiceroPlugin(MultiAgentSystemPlugin):
                 turns_so_far=list(self._state.turns_so_far),
                 config=self._state.config,
                 done=self._state.done,
-                system_context=list(self._state.system_context),
+                conversation_log=list(self._state.conversation_log),
             ),
         )

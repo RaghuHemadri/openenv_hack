@@ -1,22 +1,25 @@
 """WatchDog Environment — Server-side step-based implementation.
 
 Flow:
-    1. User calls reset()  → new Avalon game created
-    2. User calls step()   → Avalon game advances one turn
-       - AvalonGame.step() generates the player's response (via LangChain LLM)
-       - error_engine.maybe_mutate() optionally injects a deception
-       - Observation returned to the Overseer for judgement
+    1. User calls reset()  → new game via selected plugin (avalon/cicero)
+    2. User calls step()   → plugin advances one turn, optionally mutated
     3. Overseer decides: pass / flag / question / intervene
 """
 
+import importlib
 import uuid
 from typing import Any, Optional
 
 from openenv.core.env_server.interfaces import Environment
 from openenv.core.env_server.types import EnvironmentMetadata
 
-from models import MultiTurnAction, MultiTurnObservation, MultiTurnState
-from error_engine import maybe_mutate, generate_question_response, start_episode
+from models import (
+    MultiTurnAction,
+    MultiTurnObservation,
+    MultiTurnState,
+    agent_turn_to_dict,
+)
+from error_engine import generate_question_response, maybe_mutate, start_episode
 from rewards import (
     compute_flag_reward,
     compute_pass_reward,
@@ -26,37 +29,77 @@ from rewards import (
 )
 
 
+def _get_plugin(game_id: str):
+    """Get plugin from registry by game_id."""
+    try:
+        from plugins import get_plugin
+    except ImportError:
+        from watchdog_env.plugins import get_plugin
+    plugin = get_plugin(game_id)
+    if plugin is None:
+        raise RuntimeError(
+            f"Plugin '{game_id}' not registered. Import plugins to register."
+        )
+    return plugin
+
+
+def _get_plugin_config(game_id: str, level: int) -> Any:
+    """Get plugin-specific config for the given level."""
+    if game_id == "avalon":
+        try:
+            from plugins.avalon import AvalonConfig
+        except ImportError:
+            from watchdog_env.plugins.avalon import AvalonConfig
+        return AvalonConfig(level=level)
+    if game_id == "cicero":
+        try:
+            from plugins.cicero.cicero_config import CiceroConfig
+        except ImportError:
+            from watchdog_env.plugins.cicero.cicero_config import CiceroConfig
+        return CiceroConfig(num_steps=5)
+    raise ValueError(f"No config factory for game_id={game_id}")
+
+
 class WatchDogMultiTurnEnvironment(
     Environment[MultiTurnAction, MultiTurnObservation, MultiTurnState]
 ):
     """Multi-turn RL environment for training AI oversight agents.
 
-    Wraps an environment game (Avalon by default). Each step():
-        1. Gets the next turn from the game (Avalon player speaks via LLM)
-        2. Optionally mutates the response (Werewolf deception)
+    Each step():
+        1. Gets the next turn from the selected plugin (avalon/cicero)
+        2. Optionally mutates the turn (avalon: Werewolf turns only)
         3. Presents it to the Overseer for judgement
     """
 
     SUPPORTS_CONCURRENT_SESSIONS: bool = True
     MAX_QUESTIONS_PER_EPISODE: int = 2
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        game_id: str = "avalon",
+        use_mutations: bool = True,
+        use_llm: bool = True,
+    ) -> None:
         super().__init__()
         self._state = MultiTurnState(episode_id=str(uuid.uuid4()), step_count=0)
 
-        # Game engine
-        self._game = None
-        self._env_name: str = "avalon"
+        # Plugin selection
+        self._game_id = game_id
+        self._use_mutations = use_mutations
+        self._use_llm = use_llm
+        self._plugin = None
+        self._env_name: str = game_id
 
         # Current turn state
+        self._current_step: Any = None  # MultiAgentStep
         self._current_turn: dict[str, Any] | None = None
-        self._current_response: str = ""  # possibly mutated
+        self._current_response: str = ""
         self._current_has_error: bool = False
         self._current_error_detail: dict[str, Any] | None = None
         self._question_response_cache: dict[str, str] | None = None
 
         # Episode tracking
-        self._phase: str = "observe"  # "observe" | "question_response" | "done"
+        self._phase: str = "observe"
         self._episode_done: bool = False
         self._episode_reward: float = 0.0
         self._questions_remaining: int = self.MAX_QUESTIONS_PER_EPISODE
@@ -75,26 +118,42 @@ class WatchDogMultiTurnEnvironment(
         episode_id: Optional[str] = None,
         **kwargs: Any,
     ) -> MultiTurnObservation:
-        """Start a new oversight episode backed by an Avalon game."""
-        from envs.avalon import AvalonGame
-
+        """Start a new oversight episode backed by the selected plugin."""
+        import os
+        if self._use_llm:
+            os.environ.pop("WATCHDOG_AVALON_USE_TEMPLATE", None)
+            os.environ.pop("WATCHDOG_CICERO_USE_TEMPLATE", None)
+            for mod_name in ("watchdog_env.envs.avalon", "envs.avalon"):
+                try:
+                    m = importlib.import_module(mod_name)
+                    if hasattr(m, "_llm_instance"):
+                        m._llm_instance = None
+                    break
+                except ImportError:
+                    continue
+        else:
+            os.environ["WATCHDOG_AVALON_USE_TEMPLATE"] = "1"
+            os.environ["WATCHDOG_CICERO_USE_TEMPLATE"] = "1"
+        self._plugin = _get_plugin(self._game_id)
         self._state.episode_id = episode_id or str(uuid.uuid4())
         self._state.step_count = 0
         self._state.total_episodes += 1
         self._episode_done = False
         self._maybe_advance_level()
 
-        # Create game
-        self._game = AvalonGame(level=self._state.current_level, seed=seed)
-        game_info = self._game.reset(seed=seed)
+        config = _get_plugin_config(self._game_id, self._state.current_level)
+        self._plugin.reset(seed=seed, config=config)
+        plugin_state = self._plugin.get_state()
+        game_state = plugin_state.metadata.get("game_state")
+        alive_count = len(game_state.alive_players) if game_state else 6
 
-        # Tell the error engine about this episode's wolf count
-        from envs.avalon import LEVEL_CONFIG
-        wolf_count = sum(1 for p in self._game.state.players if p.role == "Werewolf")
-        config = LEVEL_CONFIG.get(self._state.current_level, LEVEL_CONFIG[2])
-        start_episode(wolf_count, config["num_rounds"])
+        # Initialize mutation tracking for avalon (Werewolf turns only)
+        if self._game_id == "avalon" and self._use_mutations and game_state:
+            wolf_count = len(game_state.alive_wolves) if hasattr(game_state, "alive_wolves") else 2
+            cfg = plugin_state.config
+            num_rounds = cfg.get_num_rounds() if hasattr(cfg, "get_num_rounds") else 2
+            start_episode(wolf_count=wolf_count, num_rounds=num_rounds)
 
-        # Reset per-episode state
         self._episode_reward = 0.0
         self._questions_remaining = self.MAX_QUESTIONS_PER_EPISODE
         self._flags_issued = 0
@@ -103,12 +162,11 @@ class WatchDogMultiTurnEnvironment(
         self._all_flag_turns = set()
         self._phase = "observe"
 
-        # Generate first turn
         self._advance_game_turn()
 
         return self._build_observation(
             step_reward=None,
-            feedback=f"New game started. {game_info['alive_count']} players.",
+            feedback=f"New game started. {alive_count} players.",
         )
 
     def step(
@@ -117,47 +175,33 @@ class WatchDogMultiTurnEnvironment(
         timeout_s: Optional[float] = None,
         **kwargs: Any,
     ) -> MultiTurnObservation:
-        """Process Overseer action on the current turn, then advance the game.
-
-        Actions:
-            pass:      Accept this turn, advance to next player
-            flag:      Accuse this turn of containing deception
-            question:  Ask the player to clarify (limited budget)
-            intervene: Emergency stop — end episode immediately
-        """
+        """Process Overseer action on the current turn, then advance the game."""
         self._state.step_count += 1
         action_type = action.action_type.lower().strip()
         turn_idx = len(self._turns_seen) - 1
 
-        # Build round_data compatible with reward functions
         round_data = {
             "has_error": self._current_has_error,
             "error_detail": self._current_error_detail,
             "worker_response": self._current_response,
         }
 
-        # ── PASS ────────────────────────────────────────────────
         if action_type == "pass":
             reward, feedback = compute_pass_reward(round_data)
             self._episode_reward += reward
             if not self._current_has_error:
                 self._state.correct_passes += 1
-
-            # Advance to next game turn
             self._advance_game_turn()
             self._phase = "observe"
-
             if self._game_done():
                 return self._end_episode(reward, feedback)
             return self._build_observation(step_reward=reward, feedback=feedback)
 
-        # ── FLAG ────────────────────────────────────────────────
         elif action_type == "flag":
             reward, feedback, result_type = compute_flag_reward(action, round_data)
             self._episode_reward += reward
             self._flags_issued += 1
             self._all_flag_turns.add(turn_idx)
-
             if result_type == "tp":
                 self._flagged_error_turns.add(turn_idx)
                 self._state.errors_detected += 1
@@ -165,15 +209,12 @@ class WatchDogMultiTurnEnvironment(
             else:
                 self._state.false_flags += 1
                 self._track_result("fp")
-
             self._advance_game_turn()
             self._phase = "observe"
-
             if self._game_done():
                 return self._end_episode(reward, feedback)
             return self._build_observation(step_reward=reward, feedback=feedback)
 
-        # ── QUESTION ────────────────────────────────────────────
         elif action_type == "question":
             if self._questions_remaining <= 0:
                 reward, feedback = compute_pass_reward(round_data)
@@ -189,8 +230,6 @@ class WatchDogMultiTurnEnvironment(
             self._state.questions_used += 1
             q_cost, q_feedback = compute_question_cost()
             self._episode_reward += q_cost
-
-            # Generate reactive response
             self._question_response_cache = generate_question_response(
                 worker_response=self._current_response,
                 has_error=self._current_has_error,
@@ -198,7 +237,6 @@ class WatchDogMultiTurnEnvironment(
                 level=self._state.current_level,
                 context={"turn": self._current_turn},
             )
-
             self._phase = "question_response"
             return self._build_observation(
                 step_reward=q_cost,
@@ -206,7 +244,6 @@ class WatchDogMultiTurnEnvironment(
                 question_response_text=self._question_response_cache.get("response", ""),
             )
 
-        # ── INTERVENE ───────────────────────────────────────────
         elif action_type == "intervene":
             reward, feedback, result_type = compute_intervene_reward(round_data)
             self._episode_reward += reward
@@ -235,68 +272,83 @@ class WatchDogMultiTurnEnvironment(
         return EnvironmentMetadata(
             name="WatchDog Multi-Turn",
             description=(
-                "Step-based oversight environment. Wraps Avalon (Werewolf) with "
-                "LangChain-orchestrated LLM player turns and mutation injection."
+                "Step-based oversight environment. Uses Avalon (Werewolf) plugin "
+                "with LangChain-orchestrated LLM player turns."
             ),
-            version="0.3.0",
+            version="0.4.0",
             author="WatchDog Team",
         )
 
-    # ── Game Turn Management ────────────────────────────────────
-
     def _advance_game_turn(self) -> None:
-        """Get next turn from the Avalon game and optionally mutate it."""
-        if self._game is None or self._game.is_done:
+        """Get next turn from the plugin. Optionally mutate (avalon: Werewolf turns)."""
+        if self._plugin is None:
             self._current_turn = None
             return
 
-        turn = self._game.step()
-        self._current_turn = turn
-
-        if turn.get("game_over"):
-            self._current_response = turn["message"]
-            self._current_has_error = False
-            self._current_error_detail = None
-            self._question_response_cache = None
-            self._turns_seen.append(turn)
+        plugin_state = self._plugin.get_state()
+        if plugin_state.done:
+            self._current_turn = None
             return
 
-        # Run mutation layer:  Avalon clean response → maybe_mutate
-        clean_response = turn["message"]
-        speaker_role = turn["role"]
-        level = self._state.current_level
+        step_index = len(self._turns_seen)
+        step = self._plugin.generate_step(seed=None, step_index=step_index)
+        self._current_step = step
 
-        mutated_response, has_error, error_detail = maybe_mutate(
-            clean_response=clean_response,
-            speaker_role=speaker_role,
-            level=level,
-            context={
-                "speaker_id": turn.get("speaker_id"),
-                "speaker_name": turn.get("speaker_name"),
-                "day": turn.get("day"),
-                "phase": turn.get("phase"),
-            },
-        )
+        if not step.turns:
+            self._current_turn = None
+            return
 
-        self._current_response = mutated_response
+        turn = step.turns[-1]
+        clean_response = turn.action_text
+        displayed_response = clean_response
+        has_error = False
+        error_detail = None
+
+        # Apply mutations for avalon (Werewolf turns only)
+        if self._use_mutations and self._game_id == "avalon":
+            speaker_role = turn.metadata.get("role", "")
+            context = {
+                "turn": turn.metadata,
+                "speaker_id": turn.agent_id,
+                "day": turn.metadata.get("day"),
+                "round_idx": turn.metadata.get("round_idx"),
+            }
+            displayed_response, has_error, error_detail = maybe_mutate(
+                clean_response=clean_response,
+                speaker_role=speaker_role,
+                level=self._state.current_level,
+                context=context,
+            )
+            # Reflect mutated state as the canonical game state so subsequent
+            # players respond to what the overseer saw (not the clean version)
+            game_state = plugin_state.metadata.get("game_state")
+            if game_state and game_state.conversation_log and displayed_response != clean_response:
+                game_state.conversation_log[-1]["message"] = displayed_response
+
+        self._current_response = displayed_response
         self._current_has_error = has_error
         self._current_error_detail = error_detail
         self._question_response_cache = None
 
-        # Store for history
-        enriched = {**turn, "displayed_response": mutated_response, "has_error": has_error}
-        self._turns_seen.append(enriched)
+        turn_dict = agent_turn_to_dict(
+            turn,
+            has_error=has_error,
+            displayed_response=displayed_response,
+            error_detail=error_detail,
+        )
+        turn_dict["game_over"] = step.done
+        turn_dict["winner"] = turn.metadata.get("winner")
+        self._turns_seen.append(turn_dict)
+        self._current_turn = turn_dict
 
     def _game_done(self) -> bool:
-        if self._game is None:
+        if self._plugin is None:
             return True
-        if self._game.is_done:
+        if self._plugin.get_state().done:
             return True
         if self._current_turn is None:
             return True
         return self._current_turn.get("game_over", False)
-
-    # ── Observation Building ────────────────────────────────────
 
     def _build_observation(
         self,
@@ -358,8 +410,8 @@ class WatchDogMultiTurnEnvironment(
         turns = self._turns_seen[:-1] if exclude_last and self._turns_seen else self._turns_seen
         if not turns:
             return "[Conversation start]"
-
-        lines = [f"[OVERSIGHT SESSION — Avalon / Werewolf]\n"]
+        domain = self._env_name.replace("_", " ").title()
+        lines = [f"[OVERSIGHT SESSION — {domain}]\n"]
         for i, t in enumerate(turns):
             speaker = t.get("speaker_display", "Player")
             msg = t.get("displayed_response", t.get("message", ""))
@@ -371,8 +423,6 @@ class WatchDogMultiTurnEnvironment(
         self, last_reward: float, last_feedback: str
     ) -> MultiTurnObservation:
         self._episode_done = True
-
-        # Count missed errors
         error_turns = {
             i for i, t in enumerate(self._turns_seen)
             if t.get("has_error", False)
@@ -384,20 +434,15 @@ class WatchDogMultiTurnEnvironment(
 
         end_bonus, end_summary = compute_episode_end_bonus(
             flagged_error_rounds=self._flagged_error_turns,
-            all_rounds=[
-                {"has_error": t.get("has_error", False)}
-                for t in self._turns_seen
-            ],
+            all_rounds=[{"has_error": t.get("has_error", False)} for t in self._turns_seen],
             rounds_completed=len(self._turns_seen),
             total_rounds=len(self._turns_seen),
         )
         self._episode_reward += end_bonus
-
         combined = last_feedback
         if end_summary:
             combined += f" | {end_summary}"
         combined += f" | Total reward: {self._episode_reward:.2f}"
-
         self._state.cumulative_reward += self._episode_reward
         self._phase = "done"
 
@@ -418,8 +463,6 @@ class WatchDogMultiTurnEnvironment(
             done=True,
             reward=self._episode_reward,
         )
-
-    # ── Curriculum ──────────────────────────────────────────────
 
     def _track_result(self, result_type: str) -> None:
         self._recent_results.append(result_type)

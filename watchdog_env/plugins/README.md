@@ -19,7 +19,7 @@ This package provides an extensible **multi-agent system plugin** layer. Each pl
 
 - **Game ID**: `cicero`
 - **Config**: `CiceroConfig(num_steps=3, powers=None, model_name="gemini-2.0-flash", temperature=0.85)`
-- **API key**: Set `GEMINI_API_KEY` or `GOOGLE_API_KEY` for live Gemini calls; otherwise the plugin uses a deterministic fallback.
+- **API key**: Set `GEMINI_API_KEY` or `GOOGLE_API_KEY` for live Gemini calls. No template fallback; LLM is required.
 - **Optional deps**: `pip install langchain-google-genai langchain-core` (or `pip install -e ".[plugins]"` from `watchdog_env`).
 
 ## Tests

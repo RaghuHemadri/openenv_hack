@@ -30,5 +30,5 @@ server = "watchdog_env.server.app:main"
 
 [tool.setuptools]
 include-package-data = true
-packages = ["watchdog_env", "watchdog_env.server", "watchdog_env.plugins", "watchdog_env.plugins.cicero"]
-package-dir = { "watchdog_env" = ".", "watchdog_env.server" = "server", "watchdog_env.plugins" = "plugins", "watchdog_env.plugins.cicero" = "plugins/cicero" }
+packages = ["watchdog_env", "watchdog_env.server", "watchdog_env.plugins", "watchdog_env.plugins.cicero", "watchdog_env.plugins.avalon"]
+package-dir = { "watchdog_env" = ".", "watchdog_env.server" = "server", "watchdog_env.plugins" = "plugins", "watchdog_env.plugins.cicero" = "plugins/cicero", "watchdog_env.plugins.avalon" = "plugins/avalon" }

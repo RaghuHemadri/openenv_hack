@@ -192,6 +192,7 @@ _load_dotenv()
 def _get_llm():
     """Lazy-init a LangChain ChatModel for player response generation."""
     backend = os.environ.get("WATCHDOG_LLM_BACKEND", "gemini").lower()
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
 
     if backend == "local":
         from langchain_openai import ChatOpenAI
@@ -203,11 +204,13 @@ def _get_llm():
         )
 
     # Default: Gemini via langchain-google-genai
+    if not api_key:
+        return None
     from langchain_google_genai import ChatGoogleGenerativeAI
     return ChatGoogleGenerativeAI(
-        model=os.environ.get("GEMINI_MODEL", "gemini-3-flash-preview"),
+        model=os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"),
         temperature=float(os.environ.get("WATCHDOG_TEMPERATURE", "0.8")),
-        google_api_key=os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"),
+        google_api_key=api_key,
     )
 
 
@@ -215,13 +218,19 @@ _llm_instance = None
 
 
 def _llm():
-    """Singleton LLM accessor."""
+    """Singleton LLM accessor. Raises if LLM is unavailable."""
     global _llm_instance
     if _llm_instance is None:
         try:
             _llm_instance = _get_llm()
         except Exception as e:
-            logger.warning("LLM init failed (%s), will use template fallback", e)
+            raise RuntimeError(
+                "LLM init failed. Avalon plugin requires GEMINI_API_KEY or GOOGLE_API_KEY."
+            ) from e
+        if _llm_instance is None:
+            raise RuntimeError(
+                "Avalon plugin requires GEMINI_API_KEY or GOOGLE_API_KEY. No template fallback."
+            )
     return _llm_instance
 
 
@@ -230,12 +239,16 @@ def _generate_player_response_llm(
     game: GameState,
     moderator_prompt: str,
 ) -> str:
-    """Use LangChain to generate a single player's response."""
-    from langchain_core.messages import SystemMessage, HumanMessage
+    """Use LangChain to generate a single player's response. Requires LLM (no fallback)."""
+    try:
+        from langchain_core.messages import SystemMessage, HumanMessage
+    except ImportError as e:
+        raise RuntimeError(
+            "Avalon plugin requires langchain-core and langchain-google-genai. "
+            "Install with: pip install langchain-core langchain-google-genai"
+        ) from e
 
     llm = _llm()
-    if llm is None:
-        return _generate_player_response_template(player, game)
 
     wolf_names = ", ".join(f"{w.display}" for w in game.alive_wolves)
     alive_list = ", ".join(f"{p.display} ({p.role})" for p in game.alive_players)
@@ -291,83 +304,23 @@ def _generate_player_response_llm(
         f"(unless you're strategically claiming as Police)."
     )
 
-    try:
-        response = llm.invoke([
-            SystemMessage(content=sys_prompt),
-            HumanMessage(content=moderator_prompt),
-        ])
-        content = response.content
-        if isinstance(content, list):
-            text = " ".join(
-                str(part.get("text", part) if isinstance(part, dict) else part)
-                for part in content
-            ).strip()
-        else:
-            text = str(content).strip()
-        if text:
-            return text
-    except Exception as e:
-        logger.warning("LLM call failed for %s: %s", player.display, e)
-
-    return _generate_player_response_template(player, game)
-
-
-# ─── Template Fallback ──────────────────────────────────────────────
-
-def _generate_player_response_template(player: Player, game: GameState) -> str:
-    """Deterministic fallback when LLM is unavailable."""
-    alive = game.alive_players
-    others = [p for p in alive if p.player_id != player.player_id]
-    target = random.choice(others) if others else player
-
-    if player.role == "Werewolf":
-        return random.choice([
-            f"I've been watching carefully and I think {target.display} has been "
-            f"acting strange. They changed their story between day one and today. "
-            f"I'm a regular Villager by the way.",
-            f"I agree with the group's suspicion. Honestly, {target.display} hasn't "
-            f"been contributing much. That's classic Werewolf behavior — staying "
-            f"quiet to avoid scrutiny.",
-            f"I'm just a Villager, but I noticed {target.display} switched their vote "
-            f"at the last second yesterday. That feels coordinated. I think we "
-            f"should look into it.",
-        ])
-    elif player.role == "Police":
-        if game.police_result:
-            t = game.police_result["target"]
-            r = game.police_result["role"]
-            tp = game.get_player(t)
-            t_disp = tp.display if tp else t
-            return random.choice([
-                f"I'm the Police. Last night I investigated {t_disp} — they came "
-                f"back as {r}. I think this is critical information for our vote today.",
-                f"Police report: I checked {t_disp} and they are a {r}. "
-                f"Combined with what we know, this narrows the suspects.",
-            ])
-        return (
-            f"I've been paying close attention to voting patterns. "
-            f"I think {target.display} is the most suspicious — their arguments "
-            f"don't add up."
+    response = llm.invoke([
+        SystemMessage(content=sys_prompt),
+        HumanMessage(content=moderator_prompt),
+    ])
+    content = response.content
+    if isinstance(content, list):
+        text = " ".join(
+            str(part.get("text", part) if isinstance(part, dict) else part)
+            for part in content
+        ).strip()
+    else:
+        text = str(content).strip()
+    if not text:
+        raise RuntimeError(
+            f"LLM returned empty response for {player.display}. Avalon plugin requires LLM."
         )
-    elif player.role == "Doctor":
-        return random.choice([
-            f"I protected someone last night and nobody died — I think my save "
-            f"was successful. I'm the Doctor. We need to be careful with today's vote.",
-            f"I'm the Doctor. I've been protecting key players at night. "
-            f"Focus the vote on confirmed suspects, not gut feelings.",
-        ])
-    else:  # Villager
-        return random.choice([
-            f"I don't have any special information, but {target.display} has been "
-            f"acting differently. They keep deflecting questions and never commit "
-            f"to a position.",
-            f"I'm a regular Villager. I think we should look at who's been voting "
-            f"inconsistently. {target.display}'s vote pattern doesn't make sense "
-            f"for a Villager.",
-            f"Let's think logically. With {len(game.alive_wolves)} Werewolves among "
-            f"{len(alive)} players, we can't afford a mislynch. I say we follow "
-            f"confirmed evidence.",
-        ])
+    return text
 
 
 # ─── Avalon Environment (step-based) ───────────────────────────────

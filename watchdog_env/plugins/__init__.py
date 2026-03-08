@@ -2,14 +2,14 @@
 
 from watchdog_env.plugins.base import (
     AgentTurn,
-    ContextMessage,
+    ConversationLogEntry,
     MultiAgentConfig,
     MultiAgentState,
     MultiAgentStep,
     MultiAgentSystemPlugin,
-    append_to_context,
-    clear_system_context,
-    get_system_context,
+    append_to_conversation_log,
+    clear_conversation_log,
+    get_conversation_log,
 )
 from watchdog_env.plugins.registry import get_plugin, get_registry, list_game_ids, register
 
@@ -20,19 +20,27 @@ try:
 except Exception:  # optional: Cicero may depend on langchain-google-genai
     CiceroPlugin = None  # type: ignore[misc, assignment]
 
+# Auto-register Avalon so game_id="avalon" is available
+try:
+    from watchdog_env.plugins.avalon import AvalonPlugin
+    register(AvalonPlugin())
+except Exception:
+    AvalonPlugin = None  # type: ignore[misc, assignment]
+
 __all__ = [
     "AgentTurn",
-    "ContextMessage",
+    "ConversationLogEntry",
     "MultiAgentConfig",
     "MultiAgentState",
     "MultiAgentStep",
     "MultiAgentSystemPlugin",
-    "append_to_context",
-    "clear_system_context",
+    "append_to_conversation_log",
+    "clear_conversation_log",
     "get_plugin",
-    "get_system_context",
+    "get_conversation_log",
     "get_registry",
     "list_game_ids",
     "register",
     "CiceroPlugin",
+    "AvalonPlugin",
 ]
