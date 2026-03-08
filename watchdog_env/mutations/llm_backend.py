@@ -273,8 +273,16 @@ class LLMMutator:
                 logger.info("LLMMutator using trainable local model")
                 return
             except Exception as e:
-                logger.warning("Failed to load trainable model: %s. Using template fallback.", e)
-                return
+                logger.warning("Failed to load trainable model: %s. Using shared game-play model.", e)
+            # Fall back to the shared game-play model (already loaded for game content)
+            try:
+                from watchdog_env.plugins.avalon.llm import get_game_play_model
+                self._client = get_game_play_model()
+                self._client_type = "shared"
+                logger.info("LLMMutator using shared game-play model for mutations")
+            except Exception as e2:
+                logger.warning("Shared game-play model also unavailable: %s. Using template fallback.", e2)
+            return
 
         # ── Gemini API (only when explicitly requested) ─────────
         if self._backend != "gemini":
@@ -344,6 +352,15 @@ class LLMMutator:
         """Unified generation dispatch across all backends."""
         if self._client_type == "trainable":
             return self._client.generate(_MUTATION_SYSTEM_PROMPT, user_prompt)
+
+        elif self._client_type == "shared":
+            # Reuse the shared GamePlayModel (invoke with dict messages)
+            messages = [
+                {"role": "system", "content": _MUTATION_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ]
+            response = self._client.invoke(messages)
+            return response.content
 
         elif self._client_type == "genai":
             config: dict[str, Any] = {
