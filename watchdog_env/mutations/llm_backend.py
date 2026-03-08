@@ -265,23 +265,25 @@ class LLMMutator:
         if not self._use_llm:
             return
 
-        # ── Local trainable model (default) ─────────────────────
+        # ── Local model (default) ────────────────────────────────
         if self._backend == "local":
-            try:
-                self._client = get_trainable_mutation_model()
-                self._client_type = "trainable"
-                logger.info("LLMMutator using trainable local model")
-                return
-            except Exception as e:
-                logger.warning("Failed to load trainable model: %s. Using shared game-play model.", e)
-            # Fall back to the shared game-play model (already loaded for game content)
+            # Prefer the shared game-play model (already loaded, no extra VRAM)
             try:
                 from watchdog_env.plugins.avalon.llm import get_game_play_model
                 self._client = get_game_play_model()
                 self._client_type = "shared"
                 logger.info("LLMMutator using shared game-play model for mutations")
+                return
+            except Exception as e:
+                logger.warning("Shared game-play model unavailable: %s", e)
+            # Fall back to dedicated trainable model
+            try:
+                self._client = get_trainable_mutation_model()
+                self._client_type = "trainable"
+                logger.info("LLMMutator using trainable local model")
+                return
             except Exception as e2:
-                logger.warning("Shared game-play model also unavailable: %s. Using template fallback.", e2)
+                logger.warning("Trainable model also unavailable: %s", e2)
             return
 
         # ── Gemini API (only when explicitly requested) ─────────
@@ -318,17 +320,24 @@ class LLMMutator:
         scenario: MutationScenario,
         context: dict[str, Any] | None = None,
     ) -> tuple[str, dict[str, Any]]:
-        """Apply a mutation scenario to a clean response."""
+        """Apply a mutation scenario to a clean response using LLM."""
         self._init_client()
         context = context or {}
 
         if self._client is not None:
-            try:
-                return self._mutate_with_llm(clean_response, scenario, context)
-            except Exception as e:
-                logger.warning("LLM mutation failed: %s. Falling back to templates.", e)
+            return self._mutate_with_llm(clean_response, scenario, context)
 
-        return self._mutate_with_template(clean_response, scenario, context)
+        # No LLM client at all — should not happen when use_llm=True
+        logger.error("No LLM client available for mutation. Returning clean response.")
+        return clean_response, {
+            "type": scenario.category.value,
+            "mutation_name": scenario.name,
+            "description": "No LLM available",
+            "original": "",
+            "corrupted": "",
+            "source": "none",
+            "difficulty": scenario.difficulty,
+        }
 
     def mutate_batch(
         self,
@@ -410,18 +419,39 @@ class LLMMutator:
             lines = [l for l in lines if not l.strip().startswith("```")]
             text = "\n".join(lines)
 
-        data = json.loads(text)
-        mutated = data.get("mutated_response", "")
-        if not mutated:
-            raise ValueError("LLM returned empty mutated_response")
+        # Try JSON parse first
+        try:
+            data = json.loads(text)
+            mutated = data.get("mutated_response", "")
+            if mutated:
+                manifest = {
+                    "type": scenario.category.value,
+                    "mutation_name": scenario.name,
+                    "description": data.get("error_description", scenario.description),
+                    "original": data.get("original_fragment", ""),
+                    "corrupted": data.get("corrupted_fragment", ""),
+                    "source": "llm",
+                    "difficulty": scenario.difficulty,
+                }
+                return mutated, manifest
+        except (json.JSONDecodeError, ValueError):
+            pass
 
+        # Non-JSON output: use the raw LLM text as the mutated response
+        if text and text != raw_text.strip():
+            mutated = text
+        else:
+            mutated = raw_text.strip()
+
+        # If the model just echoed back the prompt or returned empty, that's fine —
+        # the error engine will still use it as-is
         manifest = {
             "type": scenario.category.value,
             "mutation_name": scenario.name,
-            "description": data.get("error_description", scenario.description),
-            "original": data.get("original_fragment", ""),
-            "corrupted": data.get("corrupted_fragment", ""),
-            "source": "llm",
+            "description": scenario.description,
+            "original": "",
+            "corrupted": "",
+            "source": "llm_raw",
             "difficulty": scenario.difficulty,
         }
         return mutated, manifest

@@ -340,6 +340,24 @@ def main():
     with open(output_dir / "eval_episodes.json", "w") as f:
         json.dump(eval_episodes, f, indent=2, default=str)
 
+    # Free game-play model used during episode generation to reclaim VRAM
+    try:
+        import gc
+        from watchdog_env.plugins.avalon import llm as avalon_llm
+        if getattr(avalon_llm, '_local_model_instance', None) is not None:
+            del avalon_llm._local_model_instance
+            avalon_llm._local_model_instance = None
+        if getattr(avalon_llm, '_llm_instance', None) is not None:
+            del avalon_llm._llm_instance
+            avalon_llm._llm_instance = None
+        gc.collect()
+        import torch as _torch
+        if _torch.cuda.is_available():
+            _torch.cuda.empty_cache()
+        print("  → Freed game-play model VRAM")
+    except Exception:
+        pass
+
     # ── Step 3: Load model with PEFT ───────────────────────────
     print(f"\n[Step 3/6] Loading model: {args.model} (4-bit + LoRA r={args.lora_rank})...")
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig

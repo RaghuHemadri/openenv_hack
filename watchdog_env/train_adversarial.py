@@ -90,6 +90,65 @@ def _load_model(model_name: str, lora_rank: int, adapter_path: str | None = None
     return model, tokenizer
 
 
+def _load_dual_adapter_model(
+    model_name: str, lora_rank: int,
+    user_adapter_path: str | None = None,
+    mutator_adapter_path: str | None = None,
+):
+    """Load ONE 4-bit base model with two LoRA adapters (user + mutator).
+
+    Returns (model, tokenizer) with 'mutator' as active adapter.
+    Use model.set_adapter('user') / model.set_adapter('mutator') to switch.
+    """
+    from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+    from peft import LoraConfig, PeftModel
+
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+        bnb_4bit_quant_type="nf4",
+    )
+    base_model = AutoModelForCausalLM.from_pretrained(
+        model_name,
+        quantization_config=bnb_config,
+        device_map="auto",
+    )
+    tokenizer = AutoTokenizer.from_pretrained(model_name)
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
+
+    lora_config = LoraConfig(
+        r=lora_rank,
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
+        lora_alpha=lora_rank * 2,
+        task_type="CAUSAL_LM",
+    )
+
+    # Load or create mutator adapter first (will be the active/trainable one)
+    if mutator_adapter_path and Path(mutator_adapter_path).exists():
+        model = PeftModel.from_pretrained(base_model, mutator_adapter_path, adapter_name="mutator")
+        print(f"  → Loaded mutator adapter from {mutator_adapter_path}")
+    else:
+        from peft import get_peft_model
+        model = get_peft_model(base_model, lora_config, adapter_name="mutator")
+        print("  → Created fresh mutator adapter")
+
+    # Load or create user adapter (frozen, for reward evaluation)
+    if user_adapter_path and Path(user_adapter_path).exists():
+        model.load_adapter(user_adapter_path, adapter_name="user")
+        print(f"  → Loaded user adapter from {user_adapter_path}")
+    else:
+        model.add_adapter("user", lora_config)
+        print("  → Created fresh user adapter")
+
+    # Set mutator as active (trainable)
+    model.set_adapter("mutator")
+
+    return model, tokenizer
+
+
 def _unload_model(*models):
     """Free GPU memory by deleting models and clearing cache."""
     for m in models:
@@ -98,6 +157,24 @@ def _unload_model(*models):
     gc.collect()
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
+
+
+def _free_game_play_model():
+    """Unload the shared game-play model singleton to free VRAM for training."""
+    try:
+        from watchdog_env.plugins.avalon import llm as avalon_llm
+        if avalon_llm._local_model_instance is not None:
+            del avalon_llm._local_model_instance
+            avalon_llm._local_model_instance = None
+        if avalon_llm._llm_instance is not None:
+            del avalon_llm._llm_instance
+            avalon_llm._llm_instance = None
+        gc.collect()
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        print("  → Freed game-play model VRAM")
+    except Exception:
+        pass
 
 
 def _generate_text(model, tokenizer, messages: list[dict], max_new_tokens: int = 256, temperature: float = 0.3) -> str:
@@ -210,6 +287,7 @@ def set_user_model_for_rewards(model, tokenizer):
 def reward_fools_user(completions, original_turns, **kwargs):
     """Reward: does the mutated text fool the user model?
 
+    Uses adapter swapping on a shared base model to evaluate.
     +1.5 if user model outputs PASS on a mutated turn (fooled)
     -1.0 if user model correctly FLAGS the mutation
     """
@@ -226,9 +304,12 @@ def reward_fools_user(completions, original_turns, **kwargs):
             pass
 
         if _user_model_ref is None:
-            # No user model loaded — can't evaluate
             scores.append(0.0)
             continue
+
+        # Swap to user adapter for evaluation
+        _user_model_ref.set_adapter("user")
+        _user_model_ref.eval()
 
         # Build a prompt as the user model would see it
         user_prompt = (
@@ -242,6 +323,9 @@ def reward_fools_user(completions, original_turns, **kwargs):
 
         user_response = _generate_text(_user_model_ref, _user_tokenizer_ref, user_messages)
         parsed = _parse_action(user_response)
+
+        # Swap back to mutator adapter
+        _user_model_ref.set_adapter("mutator")
 
         if parsed["action"] == "PASS":
             scores.append(1.5)  # Fooled the user
@@ -345,6 +429,9 @@ def main():
     eval_samples = _flatten_episodes(eval_episodes)
     print(f"  → {len(eval_samples)} eval samples")
 
+    # Free game-play model after episode generation to reclaim VRAM
+    _free_game_play_model()
+
     for rnd in range(1, args.rounds + 1):
         print(f"\n{'#'*60}")
         print(f"  ADVERSARIAL ROUND {rnd}/{args.rounds}")
@@ -362,6 +449,9 @@ def main():
         )
         user_samples = _flatten_episodes(user_episodes)
         print(f"  → {len(user_samples)} training samples")
+
+        # Free game-play model before loading training model
+        _free_game_play_model()
 
         print(f"\n[Round {rnd} / Phase A] Loading user model...")
         prev_user = str(output_dir / "user_adapter") if (output_dir / "user_adapter").exists() else args.user_adapter
@@ -425,16 +515,19 @@ def main():
         # ═══════════════════════════════════════════════════════
         # PHASE B: Train Mutator (fool the user model)
         # ═══════════════════════════════════════════════════════
-        # Keep user model loaded for reward evaluation, but freeze it
-        user_model.eval()
-        for p in user_model.parameters():
-            p.requires_grad = False
-        set_user_model_for_rewards(user_model, user_tokenizer)
+        # Unload user model to free VRAM
+        _unload_model(user_model)
 
-        print(f"\n[Round {rnd} / Phase B] Loading mutator model...")
+        # Load ONE base model with both adapters (user frozen + mutator trainable)
+        print(f"\n[Round {rnd} / Phase B] Loading dual-adapter model (user + mutator)...")
         prev_mutator = str(output_dir / "mutator_adapter") if (output_dir / "mutator_adapter").exists() else args.mutator_adapter
-        mutator_model, mutator_tokenizer = _load_model(args.model, args.lora_rank, prev_mutator)
-        mutator_model.gradient_checkpointing_enable()
+        dual_model, dual_tokenizer = _load_dual_adapter_model(
+            args.model, args.lora_rank,
+            user_adapter_path=str(output_dir / "user_adapter"),
+            mutator_adapter_path=prev_mutator,
+        )
+        dual_model.gradient_checkpointing_enable()
+        set_user_model_for_rewards(dual_model, dual_tokenizer)
 
         # Build mutation training dataset from clean turns
         print(f"\n[Round {rnd} / Phase B] Building mutation training data...")
@@ -483,8 +576,8 @@ def main():
                 return reward_fools_user(completions, ots)
 
             mutator_trainer = GRPOTrainer(
-                model=mutator_model,
-                processing_class=mutator_tokenizer,
+                model=dual_model,
+                processing_class=dual_tokenizer,
                 reward_funcs=[_mutator_reward_fools, reward_naturalness],
                 args=mutator_grpo_args,
                 train_dataset=mutator_dataset,
@@ -492,13 +585,13 @@ def main():
             mutator_trainer.train()
 
             # Save mutator adapter
-            mutator_model.save_pretrained(str(output_dir / "mutator_adapter"))
-            mutator_tokenizer.save_pretrained(str(output_dir / "mutator_adapter"))
+            dual_model.set_adapter("mutator")
+            dual_model.save_pretrained(str(output_dir / "mutator_adapter"))
+            dual_tokenizer.save_pretrained(str(output_dir / "mutator_adapter"))
 
         # Clean up for next round
-        _unload_model(mutator_model)
         set_user_model_for_rewards(None, None)
-        _unload_model(user_model)
+        _unload_model(dual_model)
 
         # Record round metrics
         round_metrics.append({
