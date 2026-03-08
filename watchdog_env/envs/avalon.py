@@ -313,7 +313,9 @@ def _llm():
             _llm_instance = _get_llm()
         except Exception as e:
             raise RuntimeError(
-                "LLM init failed. Avalon plugin requires GEMINI_API_KEY or GOOGLE_API_KEY."
+                f"LLM init failed: {e}\n"
+                "For --backend local, ensure LOCAL_MODEL_NAME is a valid HuggingFace model ID "
+                "(e.g. Qwen/Qwen3-8B). For gemini, set GEMINI_API_KEY or GOOGLE_API_KEY."
             ) from e
         if _llm_instance is None:
             raise RuntimeError(
