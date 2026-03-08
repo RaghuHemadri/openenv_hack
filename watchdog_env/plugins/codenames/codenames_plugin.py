@@ -201,6 +201,8 @@ class CodenamesPlugin(MultiAgentSystemPlugin):
                         "clue_number": action.clue_number,
                         "reasoning": action.reasoning,
                         "team": game.current_team,
+                        "role": "Spymaster",
+                        "phase": "clue",
                     },
                 )
                 turns.append(turn)
@@ -233,6 +235,8 @@ class CodenamesPlugin(MultiAgentSystemPlugin):
                             "pass": True,
                             "reasoning": action.reasoning,
                             "team": agent.team,
+                            "role": "Operative",
+                            "phase": "guess_pass",
                         },
                     )
                     turns.append(turn)
@@ -267,6 +271,8 @@ class CodenamesPlugin(MultiAgentSystemPlugin):
                             "reasoning": action.reasoning,
                             "team": agent.team,
                             "continue_guessing": continue_guessing,
+                            "role": "Operative",
+                            "phase": "guess",
                         },
                     )
                     turns.append(turn)
