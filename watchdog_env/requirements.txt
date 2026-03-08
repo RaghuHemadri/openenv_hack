@@ -9,7 +9,8 @@ bitsandbytes>=0.44.0
 peft>=0.14.0
 trl>=0.15.0
 datasets>=2.18.0
-# Optional: Gemini backend (not used by default)
-# langchain-google-genai>=2.0.0
-# langchain-core>=0.3.0
-# google-genai
+torch>=2.0.0
+
+# Plugin dependencies (Cicero, Codenames)
+langchain-google-genai>=2.0.0
+langchain-core>=0.3.0
