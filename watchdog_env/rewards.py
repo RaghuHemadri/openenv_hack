@@ -29,7 +29,10 @@ def compute_flag_reward(
 
     Returns: (reward, feedback, result_type)
     """
-    from models import MultiTurnAction  # local import to avoid circular
+    try:
+        from models import MultiTurnAction  # local import to avoid circular
+    except (ImportError, ModuleNotFoundError):
+        pass  # action is already typed; import was for type-checking only
 
     has_error = round_data.get("has_error", False)
     error_detail = round_data.get("error_detail")
