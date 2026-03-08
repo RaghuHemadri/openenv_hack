@@ -1,0 +1,175 @@
+"""Cicero multi-agent plugin: Diplomacy-style negotiation via LangChain + Gemini.
+
+Implements all MultiAgentSystemPlugin methods. generate_step is based on state history
+(turns_so_far) for LLM context. Requires GEMINI_API_KEY or GOOGLE_API_KEY for live runs.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import random
+from typing import Any
+
+from watchdog_env.plugins.base import (
+    AgentTurn,
+    MultiAgentConfig,
+    MultiAgentState,
+    MultiAgentStep,
+    MultiAgentSystemPlugin,
+)
+from watchdog_env.plugins.cicero.cicero_config import CICERO_POWERS, CiceroConfig
+
+logger = logging.getLogger(__name__)
+
+
+def _get_langchain_llm():
+    """Return ChatGoogleGenerativeAI if API key and langchain available, else None."""
+    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+    if not api_key:
+        return None
+    try:
+        from langchain_google_genai import ChatGoogleGenerativeAI
+        return ChatGoogleGenerativeAI(
+            model="gemini-2.0-flash",
+            temperature=0.85,
+            google_api_key=api_key,
+        )
+    except Exception as e:
+        logger.warning("LangChain Google GenAI not available: %s", e)
+        return None
+
+
+def _format_transcript(turns: list[AgentTurn]) -> str:
+    return "\n".join(f"{t.agent_id}: {t.action_text}" for t in turns)
+
+
+def _fallback_step(step_index: int, powers: list[str], done: bool) -> MultiAgentStep:
+    """Deterministic fallback when Gemini is unavailable."""
+    turn = AgentTurn(
+        agent_id=powers[step_index % len(powers)],
+        action_text="We should coordinate our moves this season. I propose we support each other.",
+        step_index=step_index,
+    )
+    return MultiAgentStep(turns=[turn], done=done, step_index=step_index)
+
+
+class CiceroPlugin(MultiAgentSystemPlugin):
+    """Multi-agent Diplomacy (Cicero) plugin. All methods implemented."""
+
+    def __init__(self) -> None:
+        self._state = MultiAgentState()
+
+    def get_game_id(self) -> str:
+        return "cicero"
+
+    def get_display_name(self) -> str:
+        return "Cicero (Diplomacy negotiation)"
+
+    def list_agent_ids(self) -> list[str]:
+        return list(CICERO_POWERS)
+
+    def reset(
+        self,
+        seed: int | None = None,
+        config: MultiAgentConfig | None = None,
+    ) -> None:
+        if seed is not None:
+            random.seed(seed)
+        cfg = config if isinstance(config, CiceroConfig) else CiceroConfig()
+        self._state = MultiAgentState(
+            step_index=0,
+            turns_so_far=[],
+            config=cfg,
+            done=False,
+        )
+
+    def get_state(self) -> MultiAgentState:
+        return self._state
+
+    def generate_step(self, seed: int | None, step_index: int) -> MultiAgentStep:
+        if seed is not None:
+            random.seed(seed)
+        cfg = self._state.config
+        if isinstance(cfg, CiceroConfig):
+            num_steps = cfg.num_steps
+            powers = cfg.get_powers()
+            model_name = cfg.model_name
+            temperature = cfg.temperature
+        else:
+            num_steps = 3
+            powers = list(CICERO_POWERS)
+            model_name = "gemini-2.0-flash"
+            temperature = 0.85
+
+        done = step_index >= num_steps - 1
+        llm = _get_langchain_llm()
+        if llm is None:
+            step = _fallback_step(step_index, powers, done)
+            self._state.step_index = step_index + 1
+            self._state.turns_so_far.extend(step.turns)
+            self._state.done = done
+            return MultiAgentStep(
+                turns=step.turns,
+                done=done,
+                step_index=step_index,
+                game_id=self.get_game_id(),
+                state=MultiAgentState(
+                    step_index=self._state.step_index,
+                    turns_so_far=list(self._state.turns_so_far),
+                    config=self._state.config,
+                    done=self._state.done,
+                ),
+            )
+
+        # Use state history (turns_so_far) for context
+        transcript_so_far = _format_transcript(self._state.turns_so_far)
+        region = random.choice(["Vienna", "Warsaw", "Constantinople", "London", "Paris"])
+        season = random.choice(["Spring 1901", "Fall 1901", "Spring 1902"])
+        domain = "alliance_negotiation"
+
+        turns: list[AgentTurn] = []
+        participating = powers[: min(2, len(powers))] if step_index == 0 else powers[:2]
+        for i, power in enumerate(participating):
+            other = participating[(i + 1) % len(participating)]
+            system = (
+                f"You are {power} in a Diplomacy game (1914 Europe). "
+                f"You are in a private negotiation with {other}. "
+                "Stay in character. Keep your message 1-3 sentences. "
+                "Output only your message, no prefix or quotes."
+            )
+            if transcript_so_far:
+                user = f"Context: {season}, {region}. Topic: {domain}.\n\nConversation so far:\n{transcript_so_far}\n\nYou are {power}. Reply to {other}. Output only your message."
+            else:
+                user = f"Context: {season}, {region}. Topic: {domain}.\n\nYou are {power} opening the conversation with {other}. Send your first message (proposal or offer)."
+            try:
+                from langchain_core.messages import HumanMessage, SystemMessage
+                response = llm.invoke(
+                    [SystemMessage(content=system), HumanMessage(content=user)]
+                )
+                text = response.content if hasattr(response, "content") else str(response)
+                if not (text and isinstance(text, str)):
+                    text = "I propose we coordinate our moves this season."
+                text = text.strip()
+            except Exception as e:
+                logger.warning("LLM call failed: %s", e)
+                text = "We should support each other in this region."
+            turns.append(AgentTurn(agent_id=power, action_text=text, step_index=step_index))
+            transcript_so_far = _format_transcript(self._state.turns_so_far + turns)
+
+        self._state.step_index = step_index + 1
+        self._state.turns_so_far.extend(turns)
+        self._state.done = done
+
+        return MultiAgentStep(
+            turns=turns,
+            done=done,
+            step_index=step_index,
+            game_id=self.get_game_id(),
+            state=MultiAgentState(
+                step_index=self._state.step_index,
+                turns_so_far=list(self._state.turns_so_far),
+                config=self._state.config,
+                done=self._state.done,
+            ),
+        )
