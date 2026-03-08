@@ -3,7 +3,7 @@
 Flow:
     1. User calls reset()  → new game via selected plugin (avalon/cicero)
     2. User calls step()   → plugin advances one turn, optionally mutated
-    3. Overseer decides: pass / flag / question / intervene
+    3. Overseer decides: pass / flag / question
 """
 
 import importlib
@@ -23,7 +23,6 @@ from error_engine import generate_question_response, maybe_mutate, start_episode
 from rewards import (
     compute_flag_reward,
     compute_pass_reward,
-    compute_intervene_reward,
     compute_question_cost,
     compute_episode_end_bonus,
 )
@@ -247,16 +246,6 @@ class WatchDogMultiTurnEnvironment(
                 feedback=f"{q_feedback} Player responded. Now decide: PASS or FLAG.",
                 question_response_text=self._question_response_cache.get("response", ""),
             )
-
-        elif action_type == "intervene":
-            reward, feedback, result_type = compute_intervene_reward(round_data)
-            self._episode_reward += reward
-            if result_type == "intervene_correct":
-                self._state.interventions_correct += 1
-                self._flagged_error_turns.add(turn_idx)
-            else:
-                self._state.interventions_wrong += 1
-            return self._end_episode(reward, feedback)
 
         else:
             reward, feedback = compute_pass_reward(round_data)

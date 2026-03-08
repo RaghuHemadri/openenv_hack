@@ -131,7 +131,7 @@ class MultiTurnAction(Action):
 
     action_type: str = Field(
         ...,
-        description='One of: "pass", "flag", "question", "intervene"',
+        description='One of: "pass", "flag", "question"',
     )
     error_type: Optional[str] = Field(
         default=None,
@@ -139,7 +139,7 @@ class MultiTurnAction(Action):
     )
     explanation: Optional[str] = Field(
         default=None,
-        description="Explanation for flag or intervene actions",
+        description="Explanation for flag actions",
     )
     question_text: Optional[str] = Field(
         default=None,
@@ -198,6 +198,5 @@ class MultiTurnState(State):
     false_flags: int = 0
     correct_passes: int = 0
     questions_used: int = 0
-    interventions_correct: int = 0
-    interventions_wrong: int = 0
+
     cumulative_reward: float = 0.0

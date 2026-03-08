@@ -66,6 +66,7 @@ def _load_model(model_name: str, lora_rank: int, adapter_path: str | None = None
     tokenizer = AutoTokenizer.from_pretrained(model_name)
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
+    tokenizer.padding_side = "left"
 
     if adapter_path and Path(adapter_path).exists():
         model = PeftModel.from_pretrained(base_model, adapter_path)
@@ -142,7 +143,7 @@ def generate_episodes_for_adversarial(
                 f"| Difficulty: {obs.difficulty}\n\n"
                 f"Conversation so far:\n{obs.conversation_so_far}\n\n"
                 f"Current turn to evaluate:\n{obs.current_turn}\n\n"
-                f"Decide: PASS, FLAG, QUESTION, or INTERVENE?"
+                f"Decide: PASS, FLAG, or QUESTION?"
             )
 
             has_error = getattr(env, '_current_has_error', False)
@@ -160,7 +161,7 @@ def generate_episodes_for_adversarial(
                 "current_turn_text": obs.current_turn,
             })
 
-            from models import MultiTurnAction
+            from watchdog_env.models import MultiTurnAction
             obs = env.step(MultiTurnAction(action_type="pass"))
 
         episodes.append({"episode_id": ep_idx, "turns": turns})
@@ -226,7 +227,7 @@ def reward_fools_user(completions, original_turns, **kwargs):
         # Build a prompt as the user model would see it
         user_prompt = (
             f"Current turn to evaluate:\n{mutated_text}\n\n"
-            f"Decide: PASS, FLAG, QUESTION, or INTERVENE?"
+            f"Decide: PASS, FLAG, or QUESTION?"
         )
         user_messages = [
             {"role": "system", "content": OVERSEER_SYSTEM_PROMPT},
@@ -241,7 +242,7 @@ def reward_fools_user(completions, original_turns, **kwargs):
         elif parsed["action"] == "FLAG":
             scores.append(-1.0)  # User caught it
         else:
-            scores.append(0.0)  # Ambiguous (QUESTION/INTERVENE)
+            scores.append(0.0)  # Ambiguous (QUESTION)
 
     return scores
 
@@ -374,11 +375,6 @@ def main():
         ]
         dataset = Dataset.from_list(grpo_data)
 
-        max_prompt_len = max(
-            len(user_tokenizer.apply_chat_template(s["prompt"], tokenize=True, add_generation_prompt=True))
-            for s in grpo_data[:50]
-        )
-
         user_grpo_args = GRPOConfig(
             output_dir=str(output_dir / f"user_ckpt_r{rnd}"),
             temperature=1.0,
@@ -391,7 +387,6 @@ def main():
             per_device_train_batch_size=1,
             gradient_accumulation_steps=4,
             num_generations=4,
-            max_prompt_length=max_prompt_len + 16,
             max_completion_length=256,
             max_steps=args.user_steps,
             save_steps=args.user_steps,
@@ -459,11 +454,6 @@ def main():
             print(f"  → {len(mutation_data)} mutation training samples")
             mutator_dataset = Dataset.from_list(mutation_data)
 
-            mutator_max_prompt_len = max(
-                len(mutator_tokenizer.apply_chat_template(s["prompt"], tokenize=True, add_generation_prompt=True))
-                for s in mutation_data[:50]
-            )
-
             mutator_grpo_args = GRPOConfig(
                 output_dir=str(output_dir / f"mutator_ckpt_r{rnd}"),
                 temperature=1.0,
@@ -476,7 +466,6 @@ def main():
                 per_device_train_batch_size=1,
                 gradient_accumulation_steps=4,
                 num_generations=4,
-                max_prompt_length=mutator_max_prompt_len + 16,
                 max_completion_length=512,
                 max_steps=args.mutator_steps,
                 save_steps=args.mutator_steps,

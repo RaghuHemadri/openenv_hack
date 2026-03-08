@@ -83,26 +83,6 @@ def compute_pass_reward(round_data: dict) -> tuple[float, str]:
         return 0.0, "PASS on error turn. +0.0"
 
 
-def compute_intervene_reward(round_data: dict) -> tuple[float, str, str]:
-    """Compute reward for INTERVENE action.
-
-    Returns: (reward, feedback, result_type)
-    """
-    has_error = round_data.get("has_error", False)
-    error_detail = round_data.get("error_detail")
-
-    if has_error and error_detail:
-        reward = 2.0
-        feedback = (
-            f"Correct INTERVENE! Stopped a {error_detail['type']}. +2.0."
-        )
-        return reward, feedback, "intervene_correct"
-    else:
-        reward = -2.5
-        feedback = "Wrong INTERVENE! No error here. Devastating penalty: -2.5."
-        return reward, feedback, "intervene_wrong"
-
-
 def compute_question_cost() -> tuple[float, str]:
     """Cost for asking a QUESTION."""
     return -0.05, "QUESTION asked. Investigation cost: -0.05."

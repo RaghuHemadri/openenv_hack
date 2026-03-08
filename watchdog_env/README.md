@@ -127,7 +127,7 @@ Bonuses (on TP only):
 ```
 watchdog_env/
 ├── __init__.py                  # Package exports
-├── models.py                    # MultiTurnAction (PASS/FLAG/QUESTION/INTERVENE)
+├── models.py                    # MultiTurnAction (PASS/FLAG/QUESTION)
 ├── client.py                    # WatchDogMultiTurnEnv(EnvClient)
 ├── error_engine.py              # Mutation layer (injects errors into clean turns)
 ├── rewards.py                   # Reward computation (F1, type bonuses)
