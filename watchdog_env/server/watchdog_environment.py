@@ -1,7 +1,7 @@
 """WatchDog Environment — Server-side step-based implementation.
 
 Flow:
-    1. User calls reset()  → new game via selected plugin (avalon/cicero)
+    1. User calls reset()  → new game via selected plugin (avalon/cicero/codenames)
     2. User calls step()   → plugin advances one turn, optionally mutated
     3. Overseer decides: pass / flag / question
 """
@@ -56,6 +56,12 @@ def _get_plugin_config(game_id: str, level: int) -> Any:
         except ImportError:
             from watchdog_env.plugins.cicero.cicero_config import CiceroConfig
         return CiceroConfig(num_steps=5)
+    if game_id == "codenames":
+        try:
+            from plugins.codenames.codenames_config import CodenamesConfig
+        except ImportError:
+            from watchdog_env.plugins.codenames.codenames_config import CodenamesConfig
+        return CodenamesConfig(complexity_level=level)
     raise ValueError(f"No config factory for game_id={game_id}")
 
 
@@ -65,7 +71,7 @@ class WatchDogMultiTurnEnvironment(
     """Multi-turn RL environment for training AI oversight agents.
 
     Each step():
-        1. Gets the next turn from the selected plugin (avalon/cicero)
+        1. Gets the next turn from the selected plugin (avalon/cicero/codenames)
         2. Optionally mutates the turn (avalon: Werewolf turns only)
         3. Presents it to the Overseer for judgement
     """
@@ -122,15 +128,19 @@ class WatchDogMultiTurnEnvironment(
         if self._use_llm:
             os.environ.pop("WATCHDOG_AVALON_USE_TEMPLATE", None)
             os.environ.pop("WATCHDOG_CICERO_USE_TEMPLATE", None)
-            try:
-                m = importlib.import_module("watchdog_env.plugins.avalon.llm")
-                if hasattr(m, "_llm_instance"):
-                    m._llm_instance = None
-            except ImportError:
-                pass
+            os.environ.pop("WATCHDOG_CODENAMES_USE_TEMPLATE", None)
+            for mod_name in ("watchdog_env.envs.avalon", "envs.avalon"):
+                try:
+                    m = importlib.import_module(mod_name)
+                    if hasattr(m, "_llm_instance"):
+                        m._llm_instance = None
+                    break
+                except ImportError:
+                    continue
         else:
             os.environ["WATCHDOG_AVALON_USE_TEMPLATE"] = "1"
             os.environ["WATCHDOG_CICERO_USE_TEMPLATE"] = "1"
+            os.environ["WATCHDOG_CODENAMES_USE_TEMPLATE"] = "1"
         self._plugin = _get_plugin(self._game_id)
         self._state.episode_id = episode_id or str(uuid.uuid4())
         self._state.step_count = 0

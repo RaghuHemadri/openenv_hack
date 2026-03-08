@@ -5,6 +5,7 @@ Tests cover:
 - Configuration validation
 - Game state transitions (using mock board)
 - Word interactions serialization
+- Conversation log (matching Cicero pattern)
 - Integration tests (requires API key)
 
 Note: Most tests require GEMINI_API_KEY to be set since fallback mode was removed.
@@ -39,6 +40,7 @@ from watchdog_env.plugins.codenames.game_runner import (
     CodenamesGameRunner,
     GameRecord,
 )
+from watchdog_env.plugins.base import get_conversation_log
 from watchdog_env.plugins.registry import get_plugin, list_game_ids
 
 
@@ -538,6 +540,39 @@ class TestPluginIntegration:
         full_state = plugin.get_full_game_state()
         assert "game_state" in full_state
         assert "plugin_state" in full_state
+    
+    def test_conversation_log_cleared_on_reset(self):
+        """Reset clears conversation_log (matching Cicero pattern)."""
+        plugin = CodenamesPlugin()
+        plugin.reset(seed=1, config=CodenamesConfig(complexity_level=1))
+        plugin.generate_step(seed=1, step_index=0)
+        plugin.reset(seed=99, config=CodenamesConfig(complexity_level=1))
+        assert len(get_conversation_log(plugin.get_state())) == 0
+    
+    def test_conversation_log_in_step_state(self):
+        """Each step returns state with conversation_log; entries have speaker_id, message."""
+        plugin = CodenamesPlugin()
+        plugin.reset(seed=1, config=CodenamesConfig(complexity_level=1))
+        step = plugin.generate_step(seed=1, step_index=0)
+        assert step.state is not None
+        assert isinstance(step.state.conversation_log, list)
+        log = step.state.conversation_log
+        for entry in log:
+            assert "speaker_id" in entry and "message" in entry
+            assert isinstance(entry["message"], str) and len(entry["message"]) > 0
+    
+    def test_conversation_log_accumulates(self):
+        """Conversation log accumulates across steps."""
+        plugin = CodenamesPlugin()
+        plugin.reset(seed=1, config=CodenamesConfig(complexity_level=1))
+        
+        plugin.generate_step(seed=1, step_index=0)
+        log1 = get_conversation_log(plugin.get_state())
+        assert len(log1) >= 1
+        
+        plugin.generate_step(seed=1, step_index=1)
+        log2 = get_conversation_log(plugin.get_state())
+        assert len(log2) >= 2
 
 
 # ============================================================================

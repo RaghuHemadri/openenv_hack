@@ -13,13 +13,11 @@ import logging
 import random
 from typing import Any
 
+from watchdog_env.models import AgentTurn, MultiAgentConfig, MultiAgentState, MultiAgentStep
 from watchdog_env.plugins.base import (
-    AgentTurn,
-    MultiAgentConfig,
-    MultiAgentState,
-    MultiAgentStep,
     MultiAgentSystemPlugin,
-    append_to_context,
+    append_to_conversation_log,
+    get_conversation_log,
 )
 from watchdog_env.plugins.codenames.codenames_config import CODENAMES_AGENTS, CodenamesConfig
 from watchdog_env.plugins.codenames.board_generator import (
@@ -38,6 +36,17 @@ from watchdog_env.plugins.codenames.agents import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+def _get_agent_display_name(agent_id: str) -> str:
+    """Get display name for an agent ID."""
+    display_names = {
+        "red_spymaster": "Red Spymaster",
+        "red_operative": "Red Operative",
+        "blue_spymaster": "Blue Spymaster",
+        "blue_operative": "Blue Operative",
+    }
+    return display_names.get(agent_id, agent_id)
 
 
 class CodenamesPlugin(MultiAgentSystemPlugin):
@@ -111,13 +120,13 @@ class CodenamesPlugin(MultiAgentSystemPlugin):
         # Create agents
         self._agents = create_agents(cfg.model_name, cfg.temperature)
         
-        # Initialize plugin state
+        # Initialize plugin state with conversation_log (matching Cicero pattern)
         self._state = MultiAgentState(
             step_index=0,
             turns_so_far=[],
             config=cfg,
             done=False,
-            system_context=[],
+            conversation_log=[],
             metadata={
                 "game_id": "codenames",
                 "board_words": board.words,
@@ -170,6 +179,7 @@ class CodenamesPlugin(MultiAgentSystemPlugin):
         action = agent.get_action(game)
         
         turns: list[AgentTurn] = []
+        display_name = _get_agent_display_name(current_agent_id)
         
         if game.current_phase == "clue":
             # Spymaster giving clue
@@ -185,6 +195,7 @@ class CodenamesPlugin(MultiAgentSystemPlugin):
                     action_text=action_text,
                     step_index=step_index,
                     phase="clue",
+                    display_name=display_name,
                     metadata={
                         "clue_word": action.clue_word,
                         "clue_number": action.clue_number,
@@ -194,8 +205,15 @@ class CodenamesPlugin(MultiAgentSystemPlugin):
                 )
                 turns.append(turn)
                 
-                # Add to context
-                append_to_context(self._state, "assistant", action_text)
+                # Add to conversation log (matching Cicero pattern)
+                append_to_conversation_log(
+                    self._state,
+                    speaker_id=current_agent_id,
+                    speaker_display=display_name,
+                    message=action_text,
+                    phase="clue",
+                    team=game.current_team,
+                )
             
         else:  # guess phase
             # Operative making guess
@@ -210,6 +228,7 @@ class CodenamesPlugin(MultiAgentSystemPlugin):
                         action_text=action_text,
                         step_index=step_index,
                         phase="guess_pass",
+                        display_name=display_name,
                         metadata={
                             "pass": True,
                             "reasoning": action.reasoning,
@@ -217,6 +236,15 @@ class CodenamesPlugin(MultiAgentSystemPlugin):
                         },
                     )
                     turns.append(turn)
+                    
+                    append_to_conversation_log(
+                        self._state,
+                        speaker_id=current_agent_id,
+                        speaker_display=display_name,
+                        message=action_text,
+                        phase="guess_pass",
+                        team=agent.team,
+                    )
                 else:
                     # Process the guess
                     continue_guessing, result_message = game.process_guess(
@@ -232,6 +260,7 @@ class CodenamesPlugin(MultiAgentSystemPlugin):
                         action_text=action_text,
                         step_index=step_index,
                         phase="guess",
+                        display_name=display_name,
                         metadata={
                             "guessed_word": action.guessed_word,
                             "result": result_message,
@@ -242,12 +271,20 @@ class CodenamesPlugin(MultiAgentSystemPlugin):
                     )
                     turns.append(turn)
                     
+                    append_to_conversation_log(
+                        self._state,
+                        speaker_id=current_agent_id,
+                        speaker_display=display_name,
+                        message=action_text,
+                        phase="guess",
+                        team=agent.team,
+                        guessed_word=action.guessed_word,
+                        result=result_message,
+                    )
+                    
                     # If wrong guess or max guesses reached, end turn
                     if not continue_guessing and not game.game_over:
                         game.end_turn()
-                
-                # Add to context
-                append_to_context(self._state, "assistant", turns[-1].action_text)
         
         # Update state
         self._state.step_index = step_index + 1
@@ -287,7 +324,7 @@ class CodenamesPlugin(MultiAgentSystemPlugin):
             config=self._state.config,
             done=self._state.done,
             metadata=dict(self._state.metadata),
-            system_context=list(self._state.system_context),
+            conversation_log=list(self._state.conversation_log),
         )
 
     def get_full_game_state(self) -> dict[str, Any]:
