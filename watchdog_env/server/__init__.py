@@ -1,5 +1,5 @@
 """WatchDog environment server components."""
 
-from .watchdog_environment import WatchDogEnvironment
+from .watchdog_environment import WatchDogMultiTurnEnvironment
 
-__all__ = ["WatchDogEnvironment"]
+__all__ = ["WatchDogMultiTurnEnvironment"]

@@ -3,7 +3,6 @@
 from .registry import (
     MutationScenario,
     MutationCategory,
-    EnvironmentPlugin,
     MutationRegistry,
 )
 from .llm_backend import LLMMutator
@@ -11,7 +10,6 @@ from .llm_backend import LLMMutator
 __all__ = [
     "MutationScenario",
     "MutationCategory",
-    "EnvironmentPlugin",
     "MutationRegistry",
     "LLMMutator",
 ]

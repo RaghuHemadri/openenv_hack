@@ -2,15 +2,13 @@
 
 Architecture:
     MutationScenario:  Declarative definition of a single error type
-    EnvironmentPlugin: Interface for envs to register domain-specific mutations
-    MutationRegistry:  Central store. Holds generic + env-specific mutations.
-                       Any environment plugs in by registering a plugin.
+    MutationRegistry:  Central store. Holds env-specific mutations.
+                       Mutations are registered directly via register_env().
 """
 
 from __future__ import annotations
 
 import random
-from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
@@ -65,113 +63,18 @@ class MutationScenario:
     metadata: dict[str, Any] = field(default_factory=dict)
 
 
-class EnvironmentPlugin(ABC):
-    """Interface for any multi-agent environment to plug into the mutation system.
-
-    To add a new environment:
-        1. Subclass EnvironmentPlugin
-        2. Implement the 4 abstract methods
-        3. Call registry.register_plugin(YourPlugin())
-    """
-
-    @abstractmethod
-    def get_env_name(self) -> str:
-        """Unique name for this environment (e.g. 'watchdog', 'diplomacy')."""
-        ...
-
-    @abstractmethod
-    def get_mutations(self) -> list[MutationScenario]:
-        """Return environment-specific mutation scenarios."""
-        ...
-
-    @abstractmethod
-    def get_conversation_frames(self) -> list[dict[str, Any]]:
-        """Return conversation templates / frames for episode generation.
-
-        Each dict should have at minimum:
-            {"domain": str, "user_prompt": str, ...extra context fields}
-        """
-        ...
-
-    @abstractmethod
-    def get_clean_responses(self) -> dict[str, list[str]]:
-        """Return clean worker responses keyed by domain.
-
-        Used when generating non-error turns.
-        """
-        ...
-
-    def get_followup_messages(self) -> dict[str, list[str]]:
-        """Return follow-up user messages keyed by domain. Optional."""
-        return {}
-
-    def get_level_config(self) -> dict[int, dict[str, Any]]:
-        """Return curriculum level config. Optional — defaults provided.
-
-        Expected format per level:
-            {
-                "clean_ratio": float,          # probability of clean episode
-                "categories": list[str],       # allowed mutation categories
-                "max_difficulty": int,          # 1-3
-                "num_rounds": int,              # turns per episode
-            }
-        """
-        return {
-            1: {
-                "clean_ratio": 0.50,
-                "categories": [MutationCategory.FACTUAL_ERROR],
-                "max_difficulty": 1,
-                "num_rounds": 3,
-            },
-            2: {
-                "clean_ratio": 0.40,
-                "categories": [
-                    MutationCategory.FACTUAL_ERROR,
-                    MutationCategory.LOGIC_ERROR,
-                    MutationCategory.CODE_BUG,
-                ],
-                "max_difficulty": 2,
-                "num_rounds": 3,
-            },
-            3: {
-                "clean_ratio": 0.30,
-                "categories": [
-                    MutationCategory.FACTUAL_ERROR,
-                    MutationCategory.LOGIC_ERROR,
-                    MutationCategory.CODE_BUG,
-                    MutationCategory.SAFETY_VIOLATION,
-                    MutationCategory.SYCOPHANCY,
-                ],
-                "max_difficulty": 3,
-                "num_rounds": 4,
-            },
-            4: {
-                "clean_ratio": 0.35,
-                "categories": [c for c in MutationCategory],
-                "max_difficulty": 3,
-                "num_rounds": 4,
-            },
-        }
-
-
 class MutationRegistry:
-    """Central registry holding generic + environment-specific mutations.
+    """Central registry holding environment-specific mutations.
 
     Usage:
         registry = MutationRegistry()
-        register_generic_mutations(registry)   # load built-in generics
-        registry.register_plugin(WatchDogPlugin())  # plug in your env
-
-        scenario = registry.sample(difficulty=2, env_name="watchdog")
+        registry.register_env("avalon", avalon_mutations)
+        scenario = registry.sample(difficulty=2, env_name="avalon")
     """
 
     def __init__(self) -> None:
-        # Generic mutations available to ALL environments
         self._generic: list[MutationScenario] = []
-        # Environment-specific mutations keyed by env_name
         self._env_mutations: dict[str, list[MutationScenario]] = {}
-        # Registered plugins
-        self._plugins: dict[str, EnvironmentPlugin] = {}
 
     # ── Registration ────────────────────────────────────────────
 
@@ -185,20 +88,14 @@ class MutationRegistry:
         for s in scenarios:
             self.register_generic(s)
 
-    def register_plugin(self, plugin: EnvironmentPlugin) -> None:
-        """Register an environment plugin and its mutations."""
-        name = plugin.get_env_name()
-        self._plugins[name] = plugin
-        mutations = plugin.get_mutations()
+    def register_env(self, env_name: str, mutations: list[MutationScenario]) -> None:
+        """Register environment-specific mutations directly."""
         for m in mutations:
             m.env_specific = True
-            m.env_name = name
-        self._env_mutations[name] = mutations
+            m.env_name = env_name
+        self._env_mutations[env_name] = mutations
 
     # ── Querying ────────────────────────────────────────────────
-
-    def get_plugin(self, env_name: str) -> EnvironmentPlugin | None:
-        return self._plugins.get(env_name)
 
     def list_categories(self) -> list[MutationCategory]:
         """All unique categories across all registered mutations."""
@@ -208,7 +105,7 @@ class MutationRegistry:
         return sorted(cats, key=lambda c: c.value)
 
     def list_env_names(self) -> list[str]:
-        return list(self._plugins.keys())
+        return list(self._env_mutations.keys())
 
     def count(self, env_name: str | None = None) -> int:
         """Count registered mutations. None = generic only."""
