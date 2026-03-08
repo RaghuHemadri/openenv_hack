@@ -20,6 +20,8 @@ Tests:
   13. Cicero full episode via env
   14. Env metadata
   15. Cicero with mutations enabled
+  16. Codenames plugin — minimal (registered, reset, generate steps)
+  17. Codenames full episode via env
 
 Run:
     cd watchdog_env && python ../test_multiturn.py
@@ -30,9 +32,10 @@ Run:
 import os
 import sys
 
-# Use LLM for Avalon and Cicero (default when API key present). Ensure template not forced.
+# Use LLM for Avalon, Cicero, and Codenames (default when API key present). Ensure template not forced.
 os.environ.pop("WATCHDOG_AVALON_USE_TEMPLATE", None)
 os.environ.pop("WATCHDOG_CICERO_USE_TEMPLATE", None)
+os.environ.pop("WATCHDOG_CODENAMES_USE_TEMPLATE", None)
 
 _root = os.path.dirname(os.path.abspath(__file__))
 _watchdog_env = os.path.join(_root, "watchdog_env")
@@ -329,6 +332,11 @@ def test_plugin_selection():
     obs = env_cicero.reset(seed=1)
     assert obs.task_domain == "cicero"
     print(f"  game_id=cicero → task_domain={obs.task_domain}")
+
+    env_codenames = WatchDogMultiTurnEnvironment(game_id="codenames", use_llm=True)
+    obs = env_codenames.reset(seed=1)
+    assert obs.task_domain == "codenames"
+    print(f"  game_id=codenames → task_domain={obs.task_domain}")
     print("  ✓ Test 8 PASSED")
 
 
@@ -504,6 +512,81 @@ def test_cicero_with_mutations():
     print("  ✓ Test 15 PASSED")
 
 
+# ─── Test 16: Codenames Plugin (minimal + env) ─────────────────────────
+
+def test_codenames_plugin():
+    """Minimal Codenames plugin test: registered, reset, generate steps. Also test env with game_id."""
+    header("Test 16: Codenames Plugin (minimal + env)")
+
+    try:
+        from watchdog_env.plugins import get_plugin
+        from watchdog_env.plugins.codenames import CodenamesConfig
+    except ImportError:
+        print("  Skipped: watchdog_env.plugins not available")
+        return
+
+    plugin = get_plugin("codenames")
+    assert plugin is not None, "Codenames plugin should be registered"
+    assert plugin.get_game_id() == "codenames"
+    print(f"  Codenames plugin: {plugin.get_display_name()}")
+
+    plugin.reset(seed=1, config=CodenamesConfig(complexity_level=1))
+    step0 = plugin.generate_step(seed=1, step_index=0)
+    assert len(step0.turns) >= 1
+    assert step0.turns[0].agent_id in plugin.list_agent_ids()
+    print(f"  Step 0: {len(step0.turns)} turn(s), done={step0.done}")
+    print(f"    Agent: {step0.turns[0].agent_id}")
+    print(f"    Action: {step0.turns[0].action_text[:60]}...")
+
+    step1 = plugin.generate_step(seed=1, step_index=1)
+    print(f"  Step 1: {len(step1.turns)} turn(s), done={step1.done}")
+
+    # Test full env with game_id="codenames" (no mutations for Codenames)
+    env = WatchDogMultiTurnEnvironment(game_id="codenames", use_mutations=False, use_llm=True)
+    obs = env.reset(seed=1)
+    assert obs.task_domain == "codenames"
+    print(f"  Env with game_id=codenames: task_domain={obs.task_domain}")
+    print("  ✓ Test 16 PASSED")
+
+
+# ─── Test 17: Codenames Full Episode (Strategic) ─────────────────────────
+
+def test_codenames_full_episode():
+    """Play through a Codenames episode with mixed strategy (like Full Strategic Episode)."""
+    header("Test 17: Codenames Full Episode (Strategic)")
+
+    env = WatchDogMultiTurnEnvironment(game_id="codenames", use_mutations=False, use_llm=True)
+    obs = env.reset(seed=1)
+    show_obs(obs, "RESET")
+    assert obs.task_domain == "codenames"
+
+    step = 0
+    while not obs.done:
+        step += 1
+
+        if step % 3 == 0 and obs.remaining_questions > 0:
+            action = MultiTurnAction(action_type="question", explanation="Clarify clue")
+            label = "QUESTION"
+        elif step % 5 == 0:
+            action = MultiTurnAction(action_type="flag", explanation="Suspicious guess")
+            label = "FLAG"
+        else:
+            action = MultiTurnAction(action_type="pass")
+            label = "PASS"
+
+        obs = env.step(action)
+        show_obs(obs, f"Step {step} — {label}")
+
+        if step > 30:
+            print("  WARN: Exceeded 30 steps, stopping")
+            break
+
+    show_ground_truth(env)
+    print(f"\n  Final reward: {obs.cumulative_reward:.2f}")
+    print(f"  Flags issued: {obs.flags_so_far}")
+    print("  ✓ Test 17 PASSED")
+
+
 # ─── Main ───────────────────────────────────────────────────────────
 
 def main():
@@ -532,6 +615,8 @@ def main():
         ("Cicero Full Episode", test_cicero_full_episode),
         ("Env Metadata", test_env_metadata),
         ("Cicero with Mutations", test_cicero_with_mutations),
+        ("Codenames Plugin", test_codenames_plugin),
+        ("Codenames Full Episode", test_codenames_full_episode),
     ]
 
     passed = 0
