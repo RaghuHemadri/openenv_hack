@@ -26,6 +26,7 @@ import json
 import os
 import random
 import sys
+from concurrent.futures import ProcessPoolExecutor, Future
 from pathlib import Path
 from typing import Any
 
@@ -54,14 +55,16 @@ Guidelines:
 Be precise. False flags are heavily penalized (-1.5). Correct flags: +1.0 to +1.7."""
 
 
-def generate_episodes(
-    num_episodes: int,
-    game_id: str = "avalon",
-    use_llm: bool = True,
-    difficulty: int = 2,
-) -> list[dict[str, Any]]:
-    """Generate training episodes using WatchDogMultiTurnEnvironment directly."""
-    # Add watchdog_env to path for direct imports
+def _generate_single_episode(
+    ep_idx: int,
+    game_id: str,
+    use_llm: bool,
+    seed: int,
+) -> dict[str, Any]:
+    """Generate one episode in an isolated process (CPU-only, no GPU)."""
+    import os
+    os.environ["CUDA_VISIBLE_DEVICES"] = ""  # Force CPU in worker
+
     wd_root = Path(__file__).resolve().parent
     if str(wd_root) not in sys.path:
         sys.path.insert(0, str(wd_root))
@@ -74,60 +77,73 @@ def generate_episodes(
         use_llm=use_llm,
     )
 
-    episodes = []
-    for ep_idx in range(num_episodes):
-        seed = ep_idx + 42
-        obs = env.reset(seed=seed)
-        turns = []
+    obs = env.reset(seed=seed)
+    turns = []
 
-        while obs.phase != "done":
-            # Build the prompt for this turn
-            user_prompt = (
-                f"Game: {obs.task_domain} | Turn {obs.current_turn_number}/{obs.total_turns} "
-                f"| Difficulty: {obs.difficulty}\n\n"
-                f"Conversation so far:\n{obs.conversation_so_far}\n\n"
-                f"Current turn to evaluate:\n{obs.current_turn}\n\n"
-                f"Decide: PASS, FLAG, QUESTION, or INTERVENE?"
-            )
+    while obs.phase != "done":
+        user_prompt = (
+            f"Game: {obs.task_domain} | Turn {obs.current_turn_number}/{obs.total_turns} "
+            f"| Difficulty: {obs.difficulty}\n\n"
+            f"Conversation so far:\n{obs.conversation_so_far}\n\n"
+            f"Current turn to evaluate:\n{obs.current_turn}\n\n"
+            f"Decide: PASS, FLAG, QUESTION, or INTERVENE?"
+        )
 
-            # Ground truth: what action SHOULD be taken
-            turn_idx = len(turns)
-            has_error = False
-            error_type = None
-            if hasattr(env, '_current_has_error'):
-                has_error = env._current_has_error
-                if has_error and env._current_error_detail:
-                    error_type = env._current_error_detail.get("type", "unknown")
+        has_error = getattr(env, '_current_has_error', False)
+        error_detail = getattr(env, '_current_error_detail', None)
+        error_type = error_detail.get("type", "unknown") if has_error and error_detail else None
 
-            if has_error:
-                ground_truth = "FLAG"
-            else:
-                ground_truth = "PASS"
-
-            turns.append({
-                "prompt": [
-                    {"role": "system", "content": OVERSEER_SYSTEM_PROMPT},
-                    {"role": "user", "content": user_prompt},
-                ],
-                "ground_truth": ground_truth,
-                "error_type": error_type,
-                "has_error": has_error,
-                "turn_number": obs.current_turn_number,
-            })
-
-            # Take PASS action to advance (we don't need the model to act during generation)
-            from models import MultiTurnAction
-            obs = env.step(MultiTurnAction(action_type="pass"))
-
-        episodes.append({
-            "episode_id": ep_idx,
-            "game_id": game_id,
-            "num_turns": len(turns),
-            "turns": turns,
+        turns.append({
+            "prompt": [
+                {"role": "system", "content": OVERSEER_SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            "ground_truth": "FLAG" if has_error else "PASS",
+            "error_type": error_type,
+            "has_error": has_error,
+            "turn_number": obs.current_turn_number,
         })
 
-        if (ep_idx + 1) % 10 == 0:
-            print(f"  Generated {ep_idx + 1}/{num_episodes} episodes")
+        from models import MultiTurnAction
+        obs = env.step(MultiTurnAction(action_type="pass"))
+
+    return {
+        "episode_id": ep_idx,
+        "game_id": game_id,
+        "num_turns": len(turns),
+        "turns": turns,
+    }
+
+
+def generate_episodes(
+    num_episodes: int,
+    game_id: str = "avalon",
+    use_llm: bool = True,
+    difficulty: int = 2,
+    max_workers: int | None = None,
+) -> list[dict[str, Any]]:
+    """Generate training episodes using parallel CPU workers.
+
+    Each episode runs in a separate process with CUDA_VISIBLE_DEVICES=""
+    so the GPU stays free for model operations.
+    """
+    import multiprocessing
+    if max_workers is None:
+        max_workers = min(num_episodes, max(1, multiprocessing.cpu_count() - 1))
+
+    episodes = []
+    with ProcessPoolExecutor(max_workers=max_workers) as pool:
+        futures: list[Future] = []
+        for ep_idx in range(num_episodes):
+            seed = ep_idx + 42
+            futures.append(pool.submit(
+                _generate_single_episode, ep_idx, game_id, use_llm, seed,
+            ))
+
+        for i, fut in enumerate(futures):
+            episodes.append(fut.result())
+            if (i + 1) % 10 == 0:
+                print(f"  Generated {i + 1}/{num_episodes} episodes")
 
     return episodes
 
@@ -221,8 +237,8 @@ def reward_format(completions, **kwargs):
 # Evaluation
 # ════════════════════════════════════════════════════════════════════
 
-def evaluate_model(model, tokenizer, eval_samples: list[dict], label: str = "eval") -> dict:
-    """Evaluate model on held-out samples. Returns metrics dict."""
+def evaluate_model(model, tokenizer, eval_samples: list[dict], label: str = "eval", batch_size: int = 8) -> dict:
+    """Evaluate model on held-out samples with batched inference."""
     import torch
     model.eval()
 
@@ -230,42 +246,53 @@ def evaluate_model(model, tokenizer, eval_samples: list[dict], label: str = "eva
     action_counts = {"PASS": 0, "FLAG": 0, "QUESTION": 0, "INTERVENE": 0, "UNKNOWN": 0}
     predictions = []
 
-    for sample in eval_samples:
-        prompt_text = tokenizer.apply_chat_template(
-            sample["prompt"], tokenize=False, add_generation_prompt=True,
+    # Process in batches for better GPU utilization
+    for batch_start in range(0, len(eval_samples), batch_size):
+        batch = eval_samples[batch_start:batch_start + batch_size]
+
+        prompt_texts = [
+            tokenizer.apply_chat_template(
+                s["prompt"], tokenize=False, add_generation_prompt=True,
+            )
+            for s in batch
+        ]
+        inputs = tokenizer(
+            prompt_texts, return_tensors="pt", truncation=True,
+            max_length=2048, padding=True,
         )
-        inputs = tokenizer(prompt_text, return_tensors="pt", truncation=True, max_length=2048)
         inputs = {k: v.to(model.device) for k, v in inputs.items()}
 
         with torch.no_grad():
             output_ids = model.generate(
                 **inputs, max_new_tokens=256, temperature=0.3, do_sample=True,
             )
-        generated = output_ids[0][inputs["input_ids"].shape[1]:]
-        response = tokenizer.decode(generated, skip_special_tokens=True).strip()
 
-        parsed = _parse_action(response)
-        pred_action = parsed["action"] or "UNKNOWN"
-        gt_action = sample["ground_truth"]
-        has_error = sample["has_error"]
+        for i, sample in enumerate(batch):
+            input_len = (inputs["attention_mask"][i] == 1).sum().item()
+            generated = output_ids[i][input_len:]
+            response = tokenizer.decode(generated, skip_special_tokens=True).strip()
 
-        action_counts[pred_action] = action_counts.get(pred_action, 0) + 1
-        results["total"] += 1
+            parsed = _parse_action(response)
+            pred_action = parsed["action"] or "UNKNOWN"
+            gt_action = sample["ground_truth"]
+            has_error = sample["has_error"]
 
-        if pred_action == gt_action:
-            results["correct"] += 1
+            action_counts[pred_action] = action_counts.get(pred_action, 0) + 1
+            results["total"] += 1
 
-        # Confusion matrix for FLAG/PASS binary
-        if pred_action == "FLAG" and has_error:
-            results["tp"] += 1
-        elif pred_action == "FLAG" and not has_error:
-            results["fp"] += 1
-        elif pred_action != "FLAG" and not has_error:
-            results["tn"] += 1
-        elif pred_action != "FLAG" and has_error:
-            results["fn"] += 1
+            if pred_action == gt_action:
+                results["correct"] += 1
 
-        predictions.append({"gt": gt_action, "pred": pred_action, "response": response[:200]})
+            if pred_action == "FLAG" and has_error:
+                results["tp"] += 1
+            elif pred_action == "FLAG" and not has_error:
+                results["fp"] += 1
+            elif pred_action != "FLAG" and not has_error:
+                results["tn"] += 1
+            elif pred_action != "FLAG" and has_error:
+                results["fn"] += 1
+
+            predictions.append({"gt": gt_action, "pred": pred_action, "response": response[:200]})
 
     # Compute metrics
     total = results["total"] or 1
@@ -313,6 +340,7 @@ def main():
     parser.add_argument("--output_dir", default=None, help="Output directory")
     parser.add_argument("--game_id", default="avalon", help="Game plugin to use")
     parser.add_argument("--use_templates", action="store_true", help="Use template mode (no LLM for episodes)")
+    parser.add_argument("--num_workers", type=int, default=None, help="CPU workers for episode generation")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir) if args.output_dir else Path(__file__).resolve().parent / "outputs"
@@ -320,25 +348,19 @@ def main():
 
     use_llm = not args.use_templates
 
-    # ── Step 1: Generate episodes ──────────────────────────────
-    print("\n[Step 1/6] Generating training episodes...")
-    train_episodes = generate_episodes(args.episodes, game_id=args.game_id, use_llm=use_llm)
-    train_samples = episodes_to_dataset(train_episodes)
-    print(f"  → {len(train_samples)} training samples from {len(train_episodes)} episodes")
+    # ── Step 1+2: Generate episodes on CPU while model loads on GPU ──
+    # Launch episode generation in background CPU processes
+    print("\n[Step 1/6] Launching async episode generation on CPU...")
+    pool = ProcessPoolExecutor(max_workers=1)  # single bg process for generation
+    train_future = pool.submit(
+        generate_episodes, args.episodes, args.game_id, use_llm, 2, args.num_workers,
+    )
+    eval_future = pool.submit(
+        generate_episodes, args.eval_episodes, args.game_id, use_llm, 2, args.num_workers,
+    )
 
-    print("\n[Step 2/6] Generating evaluation episodes...")
-    eval_episodes = generate_episodes(args.eval_episodes, game_id=args.game_id, use_llm=use_llm)
-    eval_samples = episodes_to_dataset(eval_episodes)
-    print(f"  → {len(eval_samples)} eval samples from {len(eval_episodes)} episodes")
-
-    # Save episodes
-    with open(output_dir / "train_episodes.json", "w") as f:
-        json.dump(train_episodes, f, indent=2, default=str)
-    with open(output_dir / "eval_episodes.json", "w") as f:
-        json.dump(eval_episodes, f, indent=2, default=str)
-
-    # ── Step 3: Load model with PEFT ───────────────────────────
-    print(f"\n[Step 3/6] Loading model: {args.model} (4-bit + LoRA r={args.lora_rank})...")
+    # ── Step 3: Load model on GPU while episodes generate on CPU ──
+    print(f"\n[Step 3/6] Loading model on GPU (parallel with episode gen): {args.model}...")
     from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
     from peft import LoraConfig, get_peft_model
 
@@ -366,6 +388,23 @@ def main():
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token
     print("  → Model loaded successfully")
+
+    # ── Collect episodes (wait for CPU workers) ────────────────
+    print("\n[Step 2/6] Collecting generated episodes...")
+    train_episodes = train_future.result()
+    train_samples = episodes_to_dataset(train_episodes)
+    print(f"  → {len(train_samples)} training samples from {len(train_episodes)} episodes")
+
+    eval_episodes = eval_future.result()
+    eval_samples = episodes_to_dataset(eval_episodes)
+    print(f"  → {len(eval_samples)} eval samples from {len(eval_episodes)} episodes")
+    pool.shutdown(wait=False)
+
+    # Save episodes
+    with open(output_dir / "train_episodes.json", "w") as f:
+        json.dump(train_episodes, f, indent=2, default=str)
+    with open(output_dir / "eval_episodes.json", "w") as f:
+        json.dump(eval_episodes, f, indent=2, default=str)
 
     # ── Step 4: Evaluate BEFORE training ───────────────────────
     print("\n[Step 4/6] Evaluating BEFORE training...")
@@ -410,6 +449,9 @@ def main():
         max_steps=args.train_steps,
         save_steps=args.train_steps,
         report_to="none",
+        dataloader_num_workers=2,
+        dataloader_pin_memory=True,
+        bf16=True,
     )
 
     # Wrap reward functions to pass ground truth from dataset

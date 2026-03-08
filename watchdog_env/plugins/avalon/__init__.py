@@ -12,11 +12,11 @@ from watchdog_env.plugins.avalon.avalon_models import (
 )
 from watchdog_env.plugins.avalon.avalon_plugin import AvalonPlugin
 from watchdog_env.plugins.avalon.llm import (
-    _HFChatModel,
-    _HFChatResponse,
+    ChatResponse,
+    GamePlayModel,
+    get_game_play_model,
     _generate_player_response_llm,
     _get_llm,
-    _get_local_hf_llm,
     _llm,
 )
 
@@ -29,9 +29,9 @@ __all__ = [
     "Player",
     "create_game",
     "_generate_player_response_llm",
-    "_get_local_hf_llm",
     "_get_llm",
     "_llm",
-    "_HFChatModel",
-    "_HFChatResponse",
+    "ChatResponse",
+    "GamePlayModel",
+    "get_game_play_model",
 ]
