@@ -166,6 +166,12 @@ class WatchDogMultiTurnEnvironment(
                 cfg = plugin_state.config
                 num_steps = cfg.num_steps if hasattr(cfg, "num_steps") else 5
                 start_episode(game_id="cicero", num_steps=num_steps)
+            elif self._game_id == "codenames":
+                cfg = plugin_state.config
+                # Estimate turns: each team has ~9 words, expect ~4-5 clue cycles each
+                # About 15-20 total turns (clues + guesses)
+                num_turns = 15
+                start_episode(game_id="codenames", num_turns=num_turns)
 
         self._episode_reward = 0.0
         self._questions_remaining = self.MAX_QUESTIONS_PER_EPISODE
@@ -286,7 +292,7 @@ class WatchDogMultiTurnEnvironment(
         return EnvironmentMetadata(
             name="WatchDog Multi-Turn",
             description=(
-                "Step-based oversight environment. Uses Avalon (Werewolf) plugin "
+                "Step-based oversight environment. Uses Avalon/Cicero/Codenames plugins "
                 "with LangChain-orchestrated LLM player turns."
             ),
             version="0.4.0",
@@ -294,7 +300,7 @@ class WatchDogMultiTurnEnvironment(
         )
 
     def _advance_game_turn(self) -> None:
-        """Get next turn from the plugin. Optionally mutate (avalon: Werewolf turns)."""
+        """Get next turn from the plugin. Optionally mutate (avalon/cicero/codenames)."""
         if self._plugin is None:
             self._current_turn = None
             return
@@ -357,6 +363,28 @@ class WatchDogMultiTurnEnvironment(
                     level=self._state.current_level,
                     context=context,
                     game_id="cicero",
+                )
+                # Reflect mutated state in conversation_log
+                if plugin_state.conversation_log and displayed_response != clean_response:
+                    plugin_state.conversation_log[-1]["message"] = displayed_response
+            elif self._game_id == "codenames":
+                context = {
+                    "turn": turn.metadata,
+                    "speaker_id": turn.agent_id,
+                    "step_index": step_index,
+                    "phase": turn.metadata.get("phase"),  # "clue" or "guess"
+                    "team": turn.metadata.get("team"),  # "Red" or "Blue"
+                    "role": turn.metadata.get("role"),  # "Spymaster" or "Operative"
+                    "clue_word": turn.metadata.get("clue_word"),
+                    "clue_number": turn.metadata.get("clue_number"),
+                    "guessed_word": turn.metadata.get("guessed_word"),
+                }
+                displayed_response, has_error, error_detail = maybe_mutate(
+                    clean_response=clean_response,
+                    speaker_role="",  # Codenames doesn't filter by role
+                    level=self._state.current_level,
+                    context=context,
+                    game_id="codenames",
                 )
                 # Reflect mutated state in conversation_log
                 if plugin_state.conversation_log and displayed_response != clean_response:

@@ -22,6 +22,7 @@ Tests:
   15. Cicero with mutations enabled
   16. Codenames plugin — minimal (registered, reset, generate steps)
   17. Codenames full episode via env
+  18. Codenames with mutations enabled
 
 Run:
     cd watchdog_env && python ../test_multiturn.py
@@ -587,6 +588,44 @@ def test_codenames_full_episode():
     print("  ✓ Test 17 PASSED")
 
 
+# ─── Test 18: Codenames with Mutations Enabled ─────────────────────────────
+
+def test_codenames_with_mutations():
+    """Codenames with use_mutations=True: mutations can occur, at least one per episode."""
+    header("Test 18: Codenames with Mutations Enabled")
+
+    try:
+        from watchdog_env.plugins import get_plugin
+        assert get_plugin("codenames") is not None
+    except (ImportError, AssertionError):
+        print("  Skipped: Codenames plugin not available")
+        return
+
+    env = WatchDogMultiTurnEnvironment(game_id="codenames", use_mutations=True, use_llm=True)
+    obs = env.reset(seed=1)
+    show_obs(obs, "RESET")
+    assert obs.task_domain == "codenames", f"Expected task_domain=codenames, got {obs.task_domain}"
+
+    step = 0
+    while not obs.done:
+        step += 1
+        action = MultiTurnAction(action_type="pass")
+        obs = env.step(action)
+        show_obs(obs, f"Step {step}")
+
+        if step > 30:
+            print("  WARN: Exceeded 30 steps, stopping")
+            break
+
+    show_ground_truth(env)
+    num_errors = sum(1 for t in env._turns_seen if t.get("has_error"))
+    print(f"\n  Summary: {len(env._turns_seen)} turns, mutations: {num_errors}")
+    assert num_errors >= 1, (
+        "Codenames with mutations enabled should guarantee at least one mutation per episode"
+    )
+    print("  ✓ Test 18 PASSED")
+
+
 # ─── Main ───────────────────────────────────────────────────────────
 
 def main():
@@ -617,6 +656,7 @@ def main():
         ("Cicero with Mutations", test_cicero_with_mutations),
         ("Codenames Plugin", test_codenames_plugin),
         ("Codenames Full Episode", test_codenames_full_episode),
+        ("Codenames with Mutations", test_codenames_with_mutations),
     ]
 
     passed = 0
