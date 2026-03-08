@@ -273,9 +273,14 @@ class LLMMutator:
                 logger.info("LLMMutator using trainable local model")
                 return
             except Exception as e:
-                logger.warning("Failed to load trainable model: %s. Trying Gemini...", e)
+                logger.warning("Failed to load trainable model: %s. Using template fallback.", e)
+                return
 
-        # ── Gemini API (kept as option) ─────────────────────────
+        # ── Gemini API (only when explicitly requested) ─────────
+        if self._backend != "gemini":
+            logger.info("Unknown backend '%s'. Using template fallback.", self._backend)
+            return
+
         api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
         if not api_key:
             logger.info("No API key found. Using template fallback.")
