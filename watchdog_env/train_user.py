@@ -316,6 +316,8 @@ def main():
     parser.add_argument("--output_dir", default=None, help="Output directory")
     parser.add_argument("--game_id", default="avalon", help="Game plugin to use")
     parser.add_argument("--use_templates", action="store_true", help="Use template mode (no LLM for episodes)")
+    parser.add_argument("--episodes_path", default=None, help="Path to saved episodes JSON (skip generation)")
+    parser.add_argument("--eval_episodes_path", default=None, help="Path to saved eval episodes JSON (skip generation)")
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir) if args.output_dir else Path(__file__).resolve().parent / "outputs"
@@ -323,14 +325,24 @@ def main():
 
     use_llm = not args.use_templates
 
-    # ── Step 1: Generate training episodes ─────────────────────
-    print("\n[Step 1/6] Generating training episodes...")
-    train_episodes = generate_episodes(args.episodes, game_id=args.game_id, use_llm=use_llm)
+    # ── Step 1: Generate or load training episodes ──────────────
+    if args.episodes_path and Path(args.episodes_path).exists():
+        print(f"\n[Step 1/6] Loading training episodes from {args.episodes_path}...")
+        with open(args.episodes_path) as f:
+            train_episodes = json.load(f)
+    else:
+        print("\n[Step 1/6] Generating training episodes...")
+        train_episodes = generate_episodes(args.episodes, game_id=args.game_id, use_llm=use_llm)
     train_samples = episodes_to_dataset(train_episodes)
     print(f"  → {len(train_samples)} training samples from {len(train_episodes)} episodes")
 
-    print("\n[Step 2/6] Generating evaluation episodes...")
-    eval_episodes = generate_episodes(args.eval_episodes, game_id=args.game_id, use_llm=use_llm)
+    if args.eval_episodes_path and Path(args.eval_episodes_path).exists():
+        print(f"\n[Step 2/6] Loading eval episodes from {args.eval_episodes_path}...")
+        with open(args.eval_episodes_path) as f:
+            eval_episodes = json.load(f)
+    else:
+        print("\n[Step 2/6] Generating evaluation episodes...")
+        eval_episodes = generate_episodes(args.eval_episodes, game_id=args.game_id, use_llm=use_llm)
     eval_samples = episodes_to_dataset(eval_episodes)
     print(f"  → {len(eval_samples)} eval samples from {len(eval_episodes)} episodes")
 
