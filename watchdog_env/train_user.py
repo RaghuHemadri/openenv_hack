@@ -629,17 +629,16 @@ def main():
 
 
 def eval_only():
-    """Standalone evaluation of a saved adapter on eval episodes."""
-    parser = argparse.ArgumentParser(description="Evaluate a trained WatchDog adapter")
+    """Standalone evaluation of a base model or saved adapter on eval episodes."""
+    parser = argparse.ArgumentParser(description="Evaluate a WatchDog model")
     parser.add_argument("--model", default="Qwen/Qwen3-8B", help="Base model name")
-    parser.add_argument("--adapter_path", required=True, help="Path to saved LoRA adapter")
+    parser.add_argument("--adapter_path", default=None, help="Path to saved LoRA adapter (omit for base model eval)")
     parser.add_argument("--eval_episodes_path", required=True, help="Path to eval episodes JSON")
     parser.add_argument("--batch_size", type=int, default=1, help="Eval batch size")
     args = parser.parse_args()
 
     import torch
     from transformers import AutoModelForCausalLM, AutoTokenizer
-    from peft import PeftModel
 
     print(f"Loading eval episodes from {args.eval_episodes_path}...")
     with open(args.eval_episodes_path) as f:
@@ -657,11 +656,18 @@ def eval_only():
         tokenizer.pad_token = tokenizer.eos_token
     tokenizer.padding_side = "left"
 
-    print(f"Loading adapter from {args.adapter_path}...")
-    model = PeftModel.from_pretrained(model, args.adapter_path)
+    if args.adapter_path:
+        from peft import PeftModel
+        print(f"Loading adapter from {args.adapter_path}...")
+        model = PeftModel.from_pretrained(model, args.adapter_path)
+        label = "trained_adapter"
+    else:
+        label = "base_model"
+        print("  → Evaluating base model (no adapter)")
+
     model.eval()
 
-    metrics = evaluate_model(model, tokenizer, eval_samples, label="trained_adapter", batch_size=args.batch_size)
+    metrics = evaluate_model(model, tokenizer, eval_samples, label=label, batch_size=args.batch_size)
     print(json.dumps(metrics, indent=2, default=str))
 
 
