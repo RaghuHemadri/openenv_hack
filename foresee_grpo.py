@@ -1761,7 +1761,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     # ── Shared arguments ────────────────────────────────────────
     def add_common(p: argparse.ArgumentParser) -> None:
-        p.add_argument("--model", default="Qwen/Qwen2.5-1.5B-Instruct",
+        p.add_argument("--model", default="Qwen/Qwen3-8B",
                         help="HuggingFace model or local path")
         p.add_argument("--num-episodes", type=int, default=100,
                         help="Number of training episodes")
@@ -1836,7 +1836,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_common(p_mm)
     add_model_args(p_mm)
     add_training_args(p_mm)
-    p_mm.add_argument("--mutator-model", default="Qwen/Qwen2.5-1.5B-Instruct",
+    p_mm.add_argument("--mutator-model", default="Qwen/Qwen3-8B",
                       help="HuggingFace model for the mutator (adversary)")
     p_mm.add_argument("--minimax-rounds", type=int, default=3,
                       help="Number of minimax alternation rounds")

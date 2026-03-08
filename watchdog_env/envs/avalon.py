@@ -277,7 +277,7 @@ def _get_local_hf_llm():
     if _local_hf_model is not None:
         return _local_hf_model
 
-    model_name = os.environ.get("LOCAL_MODEL_NAME", "Qwen/Qwen2.5-3B-Instruct")
+    model_name = os.environ.get("LOCAL_MODEL_NAME", "Qwen/Qwen3-8B")
     temperature = float(os.environ.get("WATCHDOG_TEMPERATURE", "0.8"))
     _local_hf_model = _HFChatModel(model_name, temperature)
     return _local_hf_model
