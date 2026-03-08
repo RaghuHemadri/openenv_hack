@@ -153,7 +153,13 @@ class AvalonPlugin(MultiAgentSystemPlugin):
     def get_state(self) -> MultiAgentState:
         return self._state
 
-    def generate_step(self, seed: int | None, step_index: int) -> MultiAgentStep:
+    def prepare_next_turn(self, seed: int | None, step_index: int):
+        """Resolve the next speaker without generating a response.
+
+        Returns dict with speaker/game_state/moderator_prompt, or None if done.
+        May simulate night phases as a side effect.
+        Must be followed by complete_turn() with the LLM response.
+        """
         if seed is not None:
             random.seed(seed)
 
@@ -164,39 +170,9 @@ class AvalonPlugin(MultiAgentSystemPlugin):
         max_rounds: int = meta["max_rounds"]
         total_turns: int = meta["total_turns"]
 
-        # Check done
         if game_state.game_over or total_turns >= max_rounds:
-            turn = AgentTurn(
-                agent_id="SYSTEM",
-                action_text=(
-                    f"Game over. "
-                    f"{'The village wins!' if game_state.winner == 'village' else 'The Werewolves win!'}"
-                ),
-                step_index=step_index,
-                phase="end",
-                display_name="[SYSTEM] Moderator",
-                moderator_prompt="",
-                metadata={"game_over": True, "winner": game_state.winner},
-            )
-            self._state.turns_so_far.append(turn)
             self._state.done = True
-            meta["total_turns"] = total_turns + 1
-            return MultiAgentStep(
-                turns=[turn],
-                done=True,
-                step_index=step_index,
-                game_id=self.get_game_id(),
-                task_id="",
-                domain=self.get_game_id(),
-                state=MultiAgentState(
-                    step_index=self._state.step_index + 1,
-                    turns_so_far=list(self._state.turns_so_far),
-                    config=self._state.config,
-                    done=True,
-                    metadata=dict(meta),
-                    conversation_log=self._state.conversation_log,
-                ),
-            )
+            return None
 
         # Skip dead players
         while speaker_idx < len(speaker_order):
@@ -211,23 +187,40 @@ class AvalonPlugin(MultiAgentSystemPlugin):
             _simulate_night(game_state)
             meta["speaker_order"] = _setup_speaker_order(game_state)
             meta["speaker_idx"] = 0
-            return self.generate_step(seed, step_index)
+            return self.prepare_next_turn(seed, step_index)
 
+        meta["speaker_idx"] = speaker_idx
         speaker = next((p for p in game_state.players if p.player_id == speaker_order[speaker_idx]), None)
         if speaker is None:
-            turn = AgentTurn(
-                agent_id="SYSTEM",
-                action_text="Game over.",
-                step_index=step_index,
-                phase="end",
-                display_name="[SYSTEM]",
-                metadata={"game_over": True},
-            )
             self._state.done = True
-            return MultiAgentStep(turns=[turn], done=True, step_index=step_index, game_id=self.get_game_id())
+            return None
 
         moderator_prompt = _build_moderator_prompt(game_state, speaker)
-        message = _generate_player_response_llm(speaker, game_state, moderator_prompt)
+        return {
+            "speaker": speaker,
+            "game_state": game_state,
+            "moderator_prompt": moderator_prompt,
+        }
+
+    def complete_turn(self, message: str, step_index: int, moderator_prompt: str | None = None) -> MultiAgentStep:
+        """Finalize a turn with the given LLM response. Returns MultiAgentStep.
+
+        Args:
+            message: The generated player response text.
+            step_index: Current step index.
+            moderator_prompt: The prompt used to generate the response.
+                If None, rebuilds it (may differ due to random.choice).
+        """
+        meta = self._state.metadata
+        game_state: GameState = meta["game_state"]
+        speaker_order: list[str] = meta["speaker_order"]
+        speaker_idx: int = meta["speaker_idx"]
+        total_turns: int = meta["total_turns"]
+        max_rounds: int = meta["max_rounds"]
+
+        speaker = next((p for p in game_state.players if p.player_id == speaker_order[speaker_idx]), None)
+        if moderator_prompt is None:
+            moderator_prompt = _build_moderator_prompt(game_state, speaker)
 
         turn = AgentTurn(
             agent_id=speaker.player_id,
@@ -285,3 +278,51 @@ class AvalonPlugin(MultiAgentSystemPlugin):
                 conversation_log=self._state.conversation_log,
             ),
         )
+
+    def _make_done_step(self, step_index: int) -> MultiAgentStep:
+        """Create a 'game over' MultiAgentStep."""
+        meta = self._state.metadata
+        game_state: GameState = meta["game_state"]
+        total_turns: int = meta["total_turns"]
+
+        turn = AgentTurn(
+            agent_id="SYSTEM",
+            action_text=(
+                f"Game over. "
+                f"{'The village wins!' if game_state.winner == 'village' else 'The Werewolves win!'}"
+            ),
+            step_index=step_index,
+            phase="end",
+            display_name="[SYSTEM] Moderator",
+            moderator_prompt="",
+            metadata={"game_over": True, "winner": game_state.winner},
+        )
+        self._state.turns_so_far.append(turn)
+        self._state.done = True
+        meta["total_turns"] = total_turns + 1
+        return MultiAgentStep(
+            turns=[turn],
+            done=True,
+            step_index=step_index,
+            game_id=self.get_game_id(),
+            task_id="",
+            domain=self.get_game_id(),
+            state=MultiAgentState(
+                step_index=self._state.step_index + 1,
+                turns_so_far=list(self._state.turns_so_far),
+                config=self._state.config,
+                done=True,
+                metadata=dict(meta),
+                conversation_log=self._state.conversation_log,
+            ),
+        )
+
+    def generate_step(self, seed: int | None, step_index: int) -> MultiAgentStep:
+        """Generate one game turn (resolve speaker + LLM + finalize)."""
+        info = self.prepare_next_turn(seed, step_index)
+        if info is None:
+            return self._make_done_step(step_index)
+        message = _generate_player_response_llm(
+            info["speaker"], info["game_state"], info["moderator_prompt"],
+        )
+        return self.complete_turn(message, step_index, moderator_prompt=info["moderator_prompt"])

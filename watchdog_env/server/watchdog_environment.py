@@ -272,21 +272,89 @@ class WatchDogMultiTurnEnvironment(
             author="WatchDog Team",
         )
 
-    def _advance_game_turn(self) -> None:
-        """Get next turn from the plugin. Optionally mutate (avalon: Werewolf turns)."""
-        if self._plugin is None:
-            self._current_turn = None
-            return
+    # ── Batched-episode support ─────────────────────────────────────
 
+    def reset_deferred(
+        self,
+        seed: Optional[int] = None,
+        episode_id: Optional[str] = None,
+        **kwargs: Any,
+    ) -> None:
+        """Reset environment without generating the first turn.
+
+        For batched episode generation: call prepare_advance() + batch LLM +
+        complete_advance() to produce the first turn.
+        """
+        import os
+        if self._use_llm:
+            os.environ.pop("WATCHDOG_AVALON_USE_TEMPLATE", None)
+            os.environ.pop("WATCHDOG_CICERO_USE_TEMPLATE", None)
+        else:
+            os.environ["WATCHDOG_AVALON_USE_TEMPLATE"] = "1"
+            os.environ["WATCHDOG_CICERO_USE_TEMPLATE"] = "1"
+        self._plugin = _get_plugin(self._game_id)
+        self._state.episode_id = episode_id or str(uuid.uuid4())
+        self._state.step_count = 0
+        self._state.total_episodes += 1
+        self._episode_done = False
+        self._maybe_advance_level()
+
+        config = _get_plugin_config(self._game_id, self._state.current_level)
+        self._plugin.reset(seed=seed, config=config)
+        plugin_state = self._plugin.get_state()
+        game_state = plugin_state.metadata.get("game_state")
+
+        if self._use_mutations:
+            if self._game_id == "avalon" and game_state:
+                wolf_count = len(game_state.alive_wolves) if hasattr(game_state, "alive_wolves") else 2
+                cfg = plugin_state.config
+                num_rounds = cfg.get_num_rounds() if hasattr(cfg, "get_num_rounds") else 2
+                start_episode(game_id="avalon", wolf_count=wolf_count, num_rounds=num_rounds)
+            elif self._game_id == "cicero":
+                cfg = plugin_state.config
+                num_steps = cfg.num_steps if hasattr(cfg, "num_steps") else 5
+                start_episode(game_id="cicero", num_steps=num_steps)
+
+        self._episode_reward = 0.0
+        self._questions_remaining = self.MAX_QUESTIONS_PER_EPISODE
+        self._flags_issued = 0
+        self._turns_seen = []
+        self._flagged_error_turns = set()
+        self._all_flag_turns = set()
+        self._phase = "observe"
+        self._pending_moderator_prompt: Optional[str] = None
+
+    def prepare_advance(self):
+        """Get LLM request info for the next game turn.
+
+        Returns (speaker, game_state, moderator_prompt) tuple, or None if done.
+        """
+        if self._plugin is None:
+            return None
         plugin_state = self._plugin.get_state()
         if plugin_state.done:
-            self._current_turn = None
-            return
-
+            return None
         step_index = len(self._turns_seen)
-        step = self._plugin.generate_step(seed=None, step_index=step_index)
-        self._current_step = step
+        info = self._plugin.prepare_next_turn(seed=None, step_index=step_index)
+        if info is None:
+            return None
+        self._pending_moderator_prompt = info["moderator_prompt"]
+        return (info["speaker"], info["game_state"], info["moderator_prompt"])
 
+    def complete_advance(self, response: str) -> None:
+        """Complete the next game turn with a pre-generated LLM response."""
+        step_index = len(self._turns_seen)
+        step = self._plugin.complete_turn(
+            response, step_index, moderator_prompt=self._pending_moderator_prompt,
+        )
+        self._pending_moderator_prompt = None
+        self._current_step = step
+        self._apply_step_mutations(step)
+
+    # ── Internal helpers ─────────────────────────────────────────
+
+    def _apply_step_mutations(self, step) -> None:
+        """Apply mutations to a MultiAgentStep and store the resulting turn."""
         if not step.turns:
             self._current_turn = None
             return
@@ -297,7 +365,6 @@ class WatchDogMultiTurnEnvironment(
         has_error = False
         error_detail = None
 
-        # Apply mutations
         if self._use_mutations:
             if self._game_id == "avalon":
                 speaker_role = turn.metadata.get("role", "")
@@ -314,16 +381,16 @@ class WatchDogMultiTurnEnvironment(
                     context=context,
                     game_id="avalon",
                 )
-                # Reflect mutated state as the canonical game state so subsequent
-                # players respond to what the overseer saw (not the clean version)
+                plugin_state = self._plugin.get_state()
                 game_state = plugin_state.metadata.get("game_state")
                 if game_state and game_state.conversation_log and displayed_response != clean_response:
                     game_state.conversation_log[-1]["message"] = displayed_response
             elif self._game_id == "cicero":
+                plugin_state = self._plugin.get_state()
                 context = {
                     "turn": turn.metadata,
                     "speaker_id": turn.agent_id,
-                    "step_index": step_index,
+                    "step_index": len(self._turns_seen),
                     "season": turn.metadata.get("season"),
                     "region": turn.metadata.get("region"),
                     "domain_name": turn.metadata.get("domain_name"),
@@ -337,7 +404,6 @@ class WatchDogMultiTurnEnvironment(
                     context=context,
                     game_id="cicero",
                 )
-                # Reflect mutated state in conversation_log
                 if plugin_state.conversation_log and displayed_response != clean_response:
                     plugin_state.conversation_log[-1]["message"] = displayed_response
 
@@ -356,6 +422,22 @@ class WatchDogMultiTurnEnvironment(
         turn_dict["winner"] = turn.metadata.get("winner")
         self._turns_seen.append(turn_dict)
         self._current_turn = turn_dict
+
+    def _advance_game_turn(self) -> None:
+        """Get next turn from the plugin. Optionally mutate (avalon: Werewolf turns)."""
+        if self._plugin is None:
+            self._current_turn = None
+            return
+
+        plugin_state = self._plugin.get_state()
+        if plugin_state.done:
+            self._current_turn = None
+            return
+
+        step_index = len(self._turns_seen)
+        step = self._plugin.generate_step(seed=None, step_index=step_index)
+        self._current_step = step
+        self._apply_step_mutations(step)
 
     def _game_done(self) -> bool:
         if self._plugin is None:

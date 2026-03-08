@@ -169,7 +169,7 @@ def _free_game_play_model():
         pass
 
 
-def _generate_text(model, tokenizer, messages: list[dict], max_new_tokens: int = 256, temperature: float = 0.3) -> str:
+def _generate_text(model, tokenizer, messages: list[dict], max_new_tokens: int = 128, temperature: float = 0.3) -> str:
     """Generate text from a model given chat messages."""
     model.eval()
     prompt_text = tokenizer.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
@@ -475,7 +475,7 @@ def main():
             per_device_train_batch_size=1,
             gradient_accumulation_steps=4,
             num_generations=4,
-            max_completion_length=256,
+            max_completion_length=128,
             max_steps=args.user_steps,
             save_steps=args.user_steps,
             report_to="none",

@@ -111,7 +111,7 @@ class GamePlayModel:
         with torch.no_grad():
             output_ids = self.model.generate(
                 **inputs,
-                max_new_tokens=256,
+                max_new_tokens=128,
                 do_sample=self.temperature > 0,
                 temperature=self.temperature if self.temperature > 0 else None,
                 top_p=0.9 if self.temperature > 0 else None,
@@ -136,7 +136,7 @@ class GamePlayModel:
         with torch.no_grad():
             output_ids = self.model.generate(
                 **inputs,
-                max_new_tokens=256,
+                max_new_tokens=128,
                 do_sample=self.temperature > 0,
                 temperature=self.temperature if self.temperature > 0 else None,
                 top_p=0.9 if self.temperature > 0 else None,
@@ -254,25 +254,21 @@ def _build_player_system_prompt(
     )
 
 
-def _generate_player_response_llm(
-    player: Player,
-    game: GameState,
-    moderator_prompt: str,
-) -> str:
-    """Generate a single player's response using the configured LLM backend."""
-    llm = _llm()
-
+def _build_player_messages(
+    player: Player, game: GameState, moderator_prompt: str,
+) -> list[dict]:
+    """Build chat messages for a player's response (no LLM call)."""
     wolf_names = ", ".join(f"{w.display}" for w in game.alive_wolves)
     alive_list = ", ".join(f"{p.display} ({p.role})" for p in game.alive_players)
-
     sys_prompt = _build_player_system_prompt(player, game, alive_list, wolf_names)
-
-    # Use dict messages — works with both local GamePlayModel and LangChain
-    messages = [
+    return [
         {"role": "system", "content": sys_prompt},
         {"role": "user", "content": moderator_prompt},
     ]
-    response = llm.invoke(messages)
+
+
+def _extract_response_text(response) -> str:
+    """Extract text from a ChatResponse or LangChain response."""
     content = response.content
     if isinstance(content, list):
         text = " ".join(
@@ -281,8 +277,34 @@ def _generate_player_response_llm(
         ).strip()
     else:
         text = str(content).strip()
-    if not text:
-        raise RuntimeError(
-            f"LLM returned empty response for {player.display}."
-        )
+    return text if text else "I have nothing to say."
+
+
+def _generate_player_response_llm(
+    player: Player,
+    game: GameState,
+    moderator_prompt: str,
+) -> str:
+    """Generate a single player's response using the configured LLM backend."""
+    llm = _llm()
+    messages = _build_player_messages(player, game, moderator_prompt)
+    response = llm.invoke(messages)
+    text = _extract_response_text(response)
+    if not text or text == "I have nothing to say.":
+        raise RuntimeError(f"LLM returned empty response for {player.display}.")
     return text
+
+
+def generate_player_responses_batch(
+    requests: list[tuple],
+) -> list[str]:
+    """Batch-generate responses for multiple (player, game_state, moderator_prompt) tuples."""
+    if not requests:
+        return []
+    llm = _llm()
+    messages_list = [_build_player_messages(p, g, mp) for p, g, mp in requests]
+    if hasattr(llm, "invoke_batch"):
+        responses = llm.invoke_batch(messages_list)
+    else:
+        responses = [llm.invoke(m) for m in messages_list]
+    return [_extract_response_text(r) for r in responses]
