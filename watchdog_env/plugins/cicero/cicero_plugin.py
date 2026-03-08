@@ -54,6 +54,25 @@ def _fallback_step(step_index: int, powers: list[str], done: bool) -> MultiAgent
     return MultiAgentStep(turns=[turn], done=done, step_index=step_index)
 
 
+# Diplomacy game context (from diplomacy_cicero: 1914 Europe, seven powers, Supply Centers)
+_DIPLOMACY_CONTEXT = """
+Diplomacy is a strategic board game set in 1914 Europe. The board has 56 land regions and 19 sea regions.
+Seven Great Powers: Austria-Hungary, England, France, Germany, Italy, Russia, Turkey.
+Each power controls regions and units. Supply Centers (SCs) determine unit count—more SCs means more units.
+Goal: control more than half of all SCs by moving units and convincing other players to support you.
+Key regions: Vienna, Warsaw, Moscow, Constantinople, London, Paris, Berlin, Rome, Serbia, Bulgaria, Galicia, Ukraine.
+Seasons: Spring 1901, Fall 1901, Spring 1902, etc. Orders are written each season; negotiation happens before orders.
+"""
+
+_NEGOTIATION_DOMAINS = [
+    ("alliance_negotiation", "proposing or renewing an alliance for mutual support"),
+    ("move_coordination", "coordinating army/fleet moves for the coming season"),
+    ("supply_center_deal", "negotiating who gets which Supply Center or territory"),
+    ("support_request", "asking for support on a specific move or defense"),
+    ("threat_assessment", "discussing a rival power's moves or a potential stab"),
+]
+
+
 class CiceroPlugin(MultiAgentSystemPlugin):
     """Multi-agent Diplomacy (Cicero) plugin. All methods implemented."""
 
@@ -124,9 +143,14 @@ class CiceroPlugin(MultiAgentSystemPlugin):
 
         # Use state history (turns_so_far) for context
         transcript_so_far = _format_transcript(self._state.turns_so_far)
-        region = random.choice(["Vienna", "Warsaw", "Constantinople", "London", "Paris"])
-        season = random.choice(["Spring 1901", "Fall 1901", "Spring 1902"])
-        domain = "alliance_negotiation"
+        regions = [
+            "Vienna", "Warsaw", "Constantinople", "London", "Paris", "Berlin", "Rome",
+            "Serbia", "Bulgaria", "Galicia", "Ukraine", "North Sea", "Mediterranean",
+        ]
+        seasons = ["Spring 1901", "Fall 1901", "Spring 1902", "Fall 1902", "Spring 1903"]
+        region = random.choice(regions)
+        season = random.choice(seasons)
+        domain_name, domain_desc = random.choice(_NEGOTIATION_DOMAINS)
 
         turns: list[AgentTurn] = []
         participating = powers[: min(2, len(powers))] if step_index == 0 else powers[:2]
@@ -134,14 +158,26 @@ class CiceroPlugin(MultiAgentSystemPlugin):
             other = participating[(i + 1) % len(participating)]
             system = (
                 f"You are {power} in a Diplomacy game (1914 Europe). "
-                f"You are in a private negotiation with {other}. "
-                "Stay in character. Keep your message 1-3 sentences. "
-                "Output only your message, no prefix or quotes."
+                f"You are in a private, open-domain negotiation with {other}. "
+                f"{_DIPLOMACY_CONTEXT.strip()}\n\n"
+                "Stay in character as that power. Use natural diplomatic language: propose alliances, "
+                "coordinate moves, discuss Supply Centers, or respond to offers. "
+                "Keep your message 1–4 sentences. Output only your message, no prefix or quotes."
             )
             if transcript_so_far:
-                user = f"Context: {season}, {region}. Topic: {domain}.\n\nConversation so far:\n{transcript_so_far}\n\nYou are {power}. Reply to {other}. Output only your message."
+                user = (
+                    f"Season: {season}. Region of interest: {region}. "
+                    f"Topic: {domain_desc}.\n\n"
+                    f"Conversation so far:\n{transcript_so_far}\n\n"
+                    f"You are {power}. Reply to {other} in character. Output only your message."
+                )
             else:
-                user = f"Context: {season}, {region}. Topic: {domain}.\n\nYou are {power} opening the conversation with {other}. Send your first message (proposal or offer)."
+                user = (
+                    f"Season: {season}. Region of interest: {region}. "
+                    f"Topic: {domain_desc}.\n\n"
+                    f"You are {power} opening the conversation with {other}. "
+                    f"Send your first message (proposal, offer, or diplomatic overture). Output only your message."
+                )
             try:
                 from langchain_core.messages import HumanMessage, SystemMessage
                 response = llm.invoke(
@@ -149,11 +185,11 @@ class CiceroPlugin(MultiAgentSystemPlugin):
                 )
                 text = response.content if hasattr(response, "content") else str(response)
                 if not (text and isinstance(text, str)):
-                    text = "I propose we coordinate our moves this season."
+                    text = "I propose we coordinate our moves this season. Shall we support each other in the region?"
                 text = text.strip()
             except Exception as e:
                 logger.warning("LLM call failed: %s", e)
-                text = "We should support each other in this region."
+                text = "We should support each other in this region. What say you?"
             turns.append(AgentTurn(agent_id=power, action_text=text, step_index=step_index))
             transcript_so_far = _format_transcript(self._state.turns_so_far + turns)
 
