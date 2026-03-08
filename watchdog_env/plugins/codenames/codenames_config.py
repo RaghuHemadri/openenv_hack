@@ -1,8 +1,6 @@
 """Codenames plugin config: board size, team words, complexity level.
 
-LLM backend is configured via WATCHDOG_LLM_BACKEND env var:
-  - "local"  (default): shared Qwen3 8B game-play model
-  - "gemini": Google Gemini (requires GEMINI_API_KEY or GOOGLE_API_KEY)
+Uses shared local Qwen3 8B game-play model from avalon/llm.py.
 """
 
 from __future__ import annotations
@@ -27,9 +25,7 @@ TeamType = Literal["red", "blue"]
 class CodenamesConfig(MultiAgentConfig):
     """Config for a Codenames multi-agent game.
     
-    LLM backend is configured via WATCHDOG_LLM_BACKEND env var:
-      - "local"  (default): Qwen3 8B game-play model
-      - "gemini": Google Gemini (requires API key)
+    Uses shared local Qwen3 8B game-play model.
     """
 
     board_size: int = 25

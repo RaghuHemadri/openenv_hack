@@ -8,17 +8,12 @@ Tests cover:
 - Conversation log (matching Cicero pattern)
 - Integration tests
 
-LLM backend is configured via WATCHDOG_LLM_BACKEND env var:
-  - "local"  (default): shared Qwen3 8B game-play model from avalon/llm.py
-  - "gemini": Google Gemini via langchain-google-genai (requires API key)
-
-Tests that require LLM will use the local model by default.
+Uses shared local Qwen3 8B game-play model from avalon/llm.py.
 Tests marked with SKIP_WITHOUT_GPU require a GPU for the local model.
 """
 
 from __future__ import annotations
 
-import os
 import pytest
 from watchdog_env.plugins.codenames.codenames_config import CodenamesConfig, CODENAMES_AGENTS
 from watchdog_env.plugins.codenames.codenames_plugin import CodenamesPlugin
@@ -59,15 +54,8 @@ def _has_gpu():
 
 # Skip tests that require GPU for local model
 SKIP_WITHOUT_GPU = pytest.mark.skipif(
-    not _has_gpu() and os.environ.get("WATCHDOG_LLM_BACKEND", "local").lower() == "local",
+    not _has_gpu(),
     reason="GPU not available for local model"
-)
-
-# Check if Gemini API is available (for Gemini-specific tests)
-HAS_GEMINI_API = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
-SKIP_WITHOUT_GEMINI = pytest.mark.skipif(
-    not HAS_GEMINI_API,
-    reason="GEMINI_API_KEY or GOOGLE_API_KEY not set"
 )
 
 

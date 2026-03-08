@@ -2,9 +2,7 @@
 
 Implements MultiAgentSystemPlugin interface for Codenames board game.
 
-Supports two backends (configured via WATCHDOG_LLM_BACKEND env var):
-  - "local"  (default): shared Qwen3 8B game-play model from avalon/llm.py
-  - "gemini": Google Gemini via langchain-google-genai (requires API key)
+Uses shared local Qwen3 8B game-play model from avalon/llm.py.
 """
 
 from __future__ import annotations

@@ -2,20 +2,18 @@
 
 Generates word boards with complex semantic relationships based on complexity level.
 
-Supports two backends (configured via WATCHDOG_LLM_BACKEND env var):
-  - "local"  (default): shared Qwen3 8B game-play model from avalon/llm.py
-  - "gemini": Google Gemini via langchain-google-genai
+Uses shared local Qwen3 8B game-play model from avalon/llm.py.
 """
 
 from __future__ import annotations
 
 import json
 import logging
-import os
 import random
 from dataclasses import dataclass, field
 from typing import Any
 
+from watchdog_env.plugins.avalon.llm import get_game_play_model
 from watchdog_env.plugins.codenames.word_interactions import (
     WordInteractions,
     WordRelation,
@@ -23,11 +21,6 @@ from watchdog_env.plugins.codenames.word_interactions import (
 )
 
 logger = logging.getLogger(__name__)
-
-
-class GeminiNotAvailableError(Exception):
-    """Raised when Gemini API is not available (kept for backward compatibility)."""
-    pass
 
 
 class BoardGenerationError(Exception):
@@ -73,25 +66,7 @@ class BoardAssignment:
 
 
 def _get_llm():
-    """Get the configured LLM backend. Default: local Qwen3 8B.
-    
-    Supports two backends via WATCHDOG_LLM_BACKEND env var:
-      - "local"  (default): shared Qwen3 8B game-play model
-      - "gemini": Google Gemini via langchain-google-genai
-    """
-    backend = os.environ.get("WATCHDOG_LLM_BACKEND", "local").lower()
-    if backend == "gemini":
-        api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-        if api_key:
-            from langchain_google_genai import ChatGoogleGenerativeAI
-            model = os.environ.get("CODENAMES_MODEL", os.environ.get("GEMINI_MODEL", "gemini-2.5-flash"))
-            temperature = float(os.environ.get("CODENAMES_TEMPERATURE", "0.7"))
-            return ChatGoogleGenerativeAI(
-                model=model, temperature=temperature, google_api_key=api_key,
-            )
-        logger.warning("Gemini requested but no API key found. Falling back to local model.")
-    # Default: shared local game-play model
-    from watchdog_env.plugins.avalon.llm import get_game_play_model
+    """Get the shared local game-play model (Qwen3 8B)."""
     return get_game_play_model()
 
 
