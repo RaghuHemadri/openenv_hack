@@ -20,11 +20,15 @@ dev = [
     "pytest-cov>=4.0.0",
     "httpx>=0.25.0",
 ]
+plugins = [
+    "langchain-google-genai>=2.0.0",
+    "langchain-core>=0.3.0",
+]
 
 [project.scripts]
 server = "watchdog_env.server.app:main"
 
 [tool.setuptools]
 include-package-data = true
-packages = ["watchdog_env", "watchdog_env.server"]
-package-dir = { "watchdog_env" = ".", "watchdog_env.server" = "server" }
+packages = ["watchdog_env", "watchdog_env.server", "watchdog_env.plugins", "watchdog_env.plugins.cicero"]
+package-dir = { "watchdog_env" = ".", "watchdog_env.server" = "server", "watchdog_env.plugins" = "plugins", "watchdog_env.plugins.cicero" = "plugins/cicero" }
